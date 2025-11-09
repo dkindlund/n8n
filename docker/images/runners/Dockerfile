@@ -92,12 +92,19 @@ RUN set -e; \
     cd / && rm -rf /launcher-temp
 
 # ==============================================================================
-# STAGE 4: Node alpine base for JS task runner
+# STAGE 4: Claude Code CLI installation
+# ==============================================================================
+FROM node:${NODE_VERSION}-alpine AS claude-code-installer
+
+RUN npm install -g @anthropic-ai/claude-code
+
+# ==============================================================================
+# STAGE 5: Node alpine base for JS task runner
 # ==============================================================================
 FROM node:${NODE_VERSION}-alpine AS node-alpine
 
 # ==============================================================================
-# STAGE 5: Runtime
+# STAGE 6: Runtime
 # ==============================================================================
 FROM python:${PYTHON_VERSION}-alpine AS runtime
 ARG N8N_VERSION=snapshot
@@ -105,17 +112,23 @@ ARG N8N_RELEASE_TYPE=dev
 
 ENV NODE_ENV=production \
     N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE} \
-    SHELL=/bin/sh
+    SHELL=/bin/bash
 
 # Bring `uv` over from python-runner-builder
 COPY --from=python-runner-builder /usr/local/bin/uv /usr/local/bin/uv
 
-# Bring node over from node-alpine
+# Bring node, npm, and supporting files from node-alpine
 COPY --from=node-alpine /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-alpine /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node-alpine /usr/local/bin/npx /usr/local/bin/npx
+COPY --from=node-alpine /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 # libstdc++ is required by Node
 # libc6-compat is required by task-runner-launcher
-RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat
+# git is required by Claude Code for repo operations
+# bash is required by Claude Code for executing shell commands
+# curl is required for downloading files and API calls
+RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat git bash curl
 
 RUN addgroup -g 1000 -S runner \
  && adduser  -u 1000 -S -G runner -h /home/runner -D runner
@@ -125,7 +138,14 @@ WORKDIR /home/runner
 COPY --from=javascript-runner-builder --chown=root:root /app/task-runner-javascript /opt/runners/task-runner-javascript
 COPY --from=python-runner-builder --chown=root:root /app/task-runner-python /opt/runners/task-runner-python
 COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
+COPY --from=claude-code-installer /usr/local/lib/node_modules/@anthropic-ai/claude-code /usr/local/lib/node_modules/@anthropic-ai/claude-code
+COPY --from=claude-code-installer /usr/local/bin/claude /usr/local/bin/claude
 COPY --chown=root:root docker/images/runners/n8n-task-runners.json /etc/n8n-task-runners.json
+
+# Ensure claude is executable and create config directory for runner user
+RUN chmod +x /usr/local/bin/claude && \
+    mkdir -p /home/runner/.config/claude && \
+    chown -R runner:runner /home/runner/.config
 
 USER runner
 

@@ -122,12 +122,113 @@ export class JsTaskRunner extends TaskRunner {
 		);
 		this.mode = jsRunnerConfig.insecureMode ? 'insecure' : 'secure';
 
+		// Patch child_process globally BEFORE any external modules load
+		if (this.mode === 'secure') {
+			this.patchChildProcessGlobally();
+		}
+
 		this.requireResolver = createRequireResolver({
 			allowedBuiltInModules,
 			allowedExternalModules,
 		});
 
 		if (this.mode === 'secure') this.preventPrototypePollution(allowedExternalModules);
+	}
+
+	/**
+	 * Globally patches child_process to:
+	 * 1. Strip n8n authentication tokens from subprocess environments
+	 * 2. Automatically disable prompt caching for non-Anthropic models to prevent
+	 *    API errors when using models like Gemini via LiteLLM proxy
+	 */
+	private patchChildProcessGlobally() {
+		const childProcess = require('child_process');
+
+		const isSpawningClaudeCode = (command: string, args?: readonly string[]): boolean => {
+			return (
+				command === 'node' &&
+				Array.isArray(args) &&
+				args.some((arg) => arg.includes('claude') || arg === '/usr/local/bin/claude')
+			);
+		};
+
+		const extractModelFromArgs = (args?: readonly string[]): string | null => {
+			if (!Array.isArray(args)) return null;
+			const modelIndex = args.findIndex((arg) => arg === '--model');
+			return modelIndex >= 0 && modelIndex + 1 < args.length ? args[modelIndex + 1] : null;
+		};
+
+		const isAnthropicModel = (model: string): boolean => {
+			const anthropicPatterns = /claude|sonnet|opus|haiku/i;
+			return anthropicPatterns.test(model);
+		};
+
+		const stripSensitiveEnvVars = (
+			command: string,
+			args?: readonly string[],
+			env?: NodeJS.ProcessEnv,
+		) => {
+			const cleaned = env ? { ...env } : { ...process.env };
+
+			// Always strip n8n runner tokens from all subprocesses
+			delete cleaned.N8N_RUNNERS_GRANT_TOKEN;
+			delete cleaned.N8N_RUNNERS_AUTH_TOKEN;
+
+			// Smart prompt caching control for non-Anthropic models
+			if (isSpawningClaudeCode(command, args)) {
+				const modelName = extractModelFromArgs(args);
+
+				if (modelName && !isAnthropicModel(modelName)) {
+					// Non-Anthropic model detected (e.g., gemini, gpt) - disable caching
+					cleaned.DISABLE_PROMPT_CACHING = '1';
+				}
+				// For Anthropic models: keep caching enabled (don't set the var)
+			}
+
+			return cleaned;
+		};
+
+		// Store original methods
+		const originalSpawn = childProcess.spawn;
+		const originalExec = childProcess.exec;
+		const originalExecFile = childProcess.execFile;
+		const originalFork = childProcess.fork;
+
+		// Patch spawn to strip n8n tokens and handle model-specific caching
+		childProcess.spawn = (command: string, args?: any, options?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(command, args, options?.env),
+			};
+			return originalSpawn.call(childProcess, command, args, secureOptions);
+		};
+
+		// Patch exec to strip n8n tokens
+		childProcess.exec = (command: string, options?: any, callback?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(command, [], options?.env),
+			};
+			return originalExec.call(childProcess, command, secureOptions, callback);
+		};
+
+		// Patch execFile to strip n8n tokens
+		childProcess.execFile = (file: string, args?: any, options?: any, callback?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(file, args, options?.env),
+			};
+			return originalExecFile.call(childProcess, file, args, secureOptions, callback);
+		};
+
+		// Patch fork to strip n8n tokens
+		childProcess.fork = (modulePath: string, args?: any, options?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(modulePath, args, options?.env),
+			};
+			return originalFork.call(childProcess, modulePath, args, secureOptions);
+		};
 	}
 
 	private preventPrototypePollution(allowedExternalModules: Set<string> | '*') {

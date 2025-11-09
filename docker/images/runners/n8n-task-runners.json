@@ -12,6 +12,7 @@
 			"health-check-server-port": "5681",
 			"allowed-env": [
 				"PATH",
+				"SHELL",
 				"GENERIC_TIMEZONE",
 				"NODE_OPTIONS",
 				"N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT",
@@ -20,12 +21,16 @@
 				"N8N_SENTRY_DSN",
 				"N8N_VERSION",
 				"ENVIRONMENT",
-				"DEPLOYMENT_NAME"
+				"DEPLOYMENT_NAME",
+				"ANTHROPIC_API_KEY",
+				"ANTHROPIC_BASE_URL",
+				"DISABLE_PROMPT_CACHING",
+				"N8N_RUNNERS_HEALTH_CHECK_SERVER_ENABLED",
+				"N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST"
 			],
 			"env-overrides": {
-				"NODE_FUNCTION_ALLOW_BUILTIN": "crypto",
-				"NODE_FUNCTION_ALLOW_EXTERNAL": "moment",
-				"N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST": "0.0.0.0"
+				"NODE_FUNCTION_ALLOW_BUILTIN": "crypto,child_process",
+				"NODE_FUNCTION_ALLOW_EXTERNAL": "moment,axios,@anthropic-ai/claude-agent-sdk,@anthropic-ai/sdk,zod"
 			}
 		},
 		{
@@ -43,7 +48,9 @@
 				"N8N_SENTRY_DSN",
 				"N8N_VERSION",
 				"ENVIRONMENT",
-				"DEPLOYMENT_NAME"
+				"DEPLOYMENT_NAME",
+				"N8N_RUNNERS_HEALTH_CHECK_SERVER_ENABLED",
+				"N8N_RUNNERS_HEALTH_CHECK_SERVER_HOST"
 			],
 			"env-overrides": {
 				"PYTHONPATH": "/opt/runners/task-runner-python",

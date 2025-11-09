@@ -1,0 +1,47 @@
+steps:
+  # Step 1: Install dependencies and build n8n artifacts
+  - name: 'node:22.21.0-slim'
+    id: 'build-artifacts'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        set -e
+        echo "Installing pnpm..."
+        corepack enable pnpm
+
+        echo "Installing dependencies..."
+        pnpm install --frozen-lockfile
+
+        echo "Building n8n artifacts (this will create dist/task-runner-javascript)..."
+        pnpm run build:n8n
+
+        echo "Build artifacts created successfully"
+        ls -la dist/
+    env:
+      - 'CI=true'
+
+  # Step 2: Build the Docker image with Kaniko
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    id: 'build-docker-image'
+    args:
+      - '--dockerfile=docker/images/runners/Dockerfile'
+      - '--destination=gcr.io/$PROJECT_ID/n8n-runners:$COMMIT_SHA'
+      - '--destination=gcr.io/$PROJECT_ID/n8n-runners:latest'
+      - '--cache=true'
+      - '--cache-ttl=168h'
+      - '--build-arg=N8N_VERSION=$TAG_NAME'
+      - '--build-arg=N8N_RELEASE_TYPE=release'
+      - '--build-arg=TARGETPLATFORM=linux/amd64'
+      - '--context=dir:///workspace/'
+    waitFor: ['build-artifacts']
+
+# Build timeout - 60 minutes
+timeout: '3600s'
+
+# Use default machine type for cost savings
+# Default is N1_HIGHCPU_8 which is sufficient and cost-effective
+options:
+  # Using default machine type (no machineType specified = N1_HIGHCPU_8)
+  # diskSizeGb: 50  # Using default 100GB is fine, can reduce if needed
+  logging: CLOUD_LOGGING_ONLY  # Reduces logs storage costs
