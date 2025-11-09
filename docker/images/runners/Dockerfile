@@ -152,8 +152,8 @@ RUN echo "=== Config File Debug ===" && \
     ls -la /etc/n8n-task-runners.json && \
     echo "=== Config File Contents ===" && \
     cat /etc/n8n-task-runners.json && \
-    echo "=== Checking Runner User Access ===" && \
-    su - runner -c "cat /etc/n8n-task-runners.json | head -5" && \
+    echo "=== Checking File Permissions ===" && \
+    stat /etc/n8n-task-runners.json && \
     echo "=== Debug Complete ==="
 
 USER runner
