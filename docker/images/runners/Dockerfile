@@ -147,6 +147,15 @@ RUN chmod +x /usr/local/bin/claude && \
     mkdir -p /home/runner/.config/claude && \
     chown -R runner:runner /home/runner/.config
 
+# Debug: Verify config file exists and is readable
+RUN echo "=== Config File Debug ===" && \
+    ls -la /etc/n8n-task-runners.json && \
+    echo "=== Config File Contents ===" && \
+    cat /etc/n8n-task-runners.json && \
+    echo "=== Checking Runner User Access ===" && \
+    su - runner -c "cat /etc/n8n-task-runners.json | head -5" && \
+    echo "=== Debug Complete ==="
+
 USER runner
 
 EXPOSE 5680/tcp
