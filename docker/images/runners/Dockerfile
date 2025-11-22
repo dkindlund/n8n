@@ -11,15 +11,6 @@ WORKDIR /app/task-runner-javascript
 
 RUN corepack enable pnpm
 
-# Install extra runtime-only npm packages. Allow usage in the Code node via
-# 'NODE_FUNCTION_ALLOW_EXTERNAL' env variable on n8n-task-runners.json.
-RUN rm -f node_modules/.modules.yaml
-RUN mv package.json package.json.bak
-COPY docker/images/runners/package.json /app/task-runner-javascript/package.json
-RUN pnpm install --prod --no-lockfile --silent
-RUN mv package.json extras.json
-RUN mv package.json.bak package.json
-
 # Remove `catalog` and `workspace` references from package.json to allow `pnpm add` in extended images
 RUN node -e "const pkg = require('./package.json'); \
     Object.keys(pkg.dependencies || {}).forEach(k => { \
@@ -79,11 +70,6 @@ RUN uv sync \
 			--all-extras \
       --no-editable
 
-# Install extra runtime-only Python packages. Allow usage in the Code node via
-# 'N8N_RUNNERS_EXTERNAL_ALLOW' env variable on n8n-task-runners.json.
-COPY docker/images/runners/extras.txt /app/task-runner-python/extras.txt
-RUN uv pip install -r /app/task-runner-python/extras.txt
-
 # ==============================================================================
 # STAGE 3: Task Runner Launcher download
 # ==============================================================================
@@ -107,19 +93,12 @@ RUN set -e; \
     cd / && rm -rf /launcher-temp
 
 # ==============================================================================
-# STAGE 4: Claude Code CLI installation
-# ==============================================================================
-FROM node:${NODE_VERSION}-alpine AS claude-code-installer
-
-RUN npm install -g @anthropic-ai/claude-code
-
-# ==============================================================================
-# STAGE 5: Node alpine base for JS task runner
+# STAGE 4: Node alpine base for JS task runner
 # ==============================================================================
 FROM node:${NODE_VERSION}-alpine AS node-alpine
 
 # ==============================================================================
-# STAGE 6: Runtime
+# STAGE 5: Runtime
 # ==============================================================================
 FROM python:${PYTHON_VERSION}-alpine AS runtime
 ARG N8N_VERSION=snapshot
@@ -127,23 +106,17 @@ ARG N8N_RELEASE_TYPE=dev
 
 ENV NODE_ENV=production \
     N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE} \
-    SHELL=/bin/bash
+    SHELL=/bin/sh
 
 # Bring `uv` over from python-runner-builder, to make the image easier to extend
 COPY --from=python-runner-builder /usr/local/bin/uv /usr/local/bin/uv
 
-# Bring node, npm, and supporting files from node-alpine
+# Bring node over from node-alpine
 COPY --from=node-alpine /usr/local/bin/node /usr/local/bin/node
-COPY --from=node-alpine /usr/local/bin/npm /usr/local/bin/npm
-COPY --from=node-alpine /usr/local/bin/npx /usr/local/bin/npx
-COPY --from=node-alpine /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 # libstdc++ is required by Node
 # libc6-compat is required by task-runner-launcher
-# git is required by Claude Code for repo operations
-# bash is required by Claude Code for executing shell commands
-# curl is required for downloading files and API calls
-RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat git bash curl
+RUN apk add --no-cache ca-certificates tini libstdc++ libc6-compat
 
 # Bring corepack and pnpm over, to make the image easier to extend
 COPY --from=node-alpine /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -158,14 +131,7 @@ WORKDIR /home/runner
 COPY --from=javascript-runner-builder --chown=root:root /app/task-runner-javascript /opt/runners/task-runner-javascript
 COPY --from=python-runner-builder --chown=root:root /app/task-runner-python /opt/runners/task-runner-python
 COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
-COPY --from=claude-code-installer /usr/local/lib/node_modules/@anthropic-ai/claude-code /usr/local/lib/node_modules/@anthropic-ai/claude-code
-COPY --from=claude-code-installer /usr/local/bin/claude /usr/local/bin/claude
 COPY --chown=root:root docker/images/runners/n8n-task-runners.json /etc/n8n-task-runners.json
-
-# Ensure claude is executable and create config directory for runner user
-RUN chmod +x /usr/local/bin/claude && \
-    mkdir -p /home/runner/.config/claude && \
-    chown -R runner:runner /home/runner/.config
 
 USER runner
 

@@ -54,5 +54,30 @@ docker run --rm -it \
 n8nio/runners
 ```
 
+## Extended Image with Claude Code
+
+An extended image with Claude Code CLI and enhanced capabilities is available via `Dockerfile.extended`. This image includes:
+- Claude Code CLI for AI-powered code assistance
+- Additional system tools (git, bash, curl, npm, npx)
+- Claude Agent SDK and related dependencies
+- Security enhancements for subprocess isolation
+
+To build the extended image:
+
+```bash
+# 1. Build the base image first
+docker buildx build \
+  -f docker/images/runners/Dockerfile \
+  -t n8nio/runners-base \
+  .
+
+# 2. Build the extended image
+docker buildx build \
+  -f docker/images/runners/Dockerfile.extended \
+  --build-arg BASE_IMAGE=n8nio/runners-base \
+  -t n8nio/runners \
+  .
+```
+
 If you need to add extra dependencies (custom image), follow [these instructions](https://docs.n8n.io/hosting/configuration/task-runners/#adding-extra-dependencies).
 

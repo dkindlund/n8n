@@ -1,0 +1,61 @@
+# ==============================================================================
+# EXTENDED RUNNERS IMAGE WITH CLAUDE CODE
+# ==============================================================================
+# This Dockerfile extends the base n8nio/runners image with Claude Code CLI
+# and additional dependencies for enhanced code analysis capabilities.
+#
+# Key additions:
+# - Claude Code CLI for AI-powered code assistance
+# - System tools: git, bash, curl, npm, npx
+# - JavaScript dependencies: @anthropic-ai/claude-agent-sdk, @anthropic-ai/sdk, moment
+# - Environment configured for Claude Code execution
+# ==============================================================================
+
+ARG BASE_IMAGE=n8nio/runners:latest
+
+FROM ${BASE_IMAGE}
+
+# Switch to root for installations
+USER root
+
+# Install system dependencies required by Claude Code
+# git: Required for repository operations
+# bash: Required for executing shell commands
+# curl: Required for downloading files and API calls
+RUN apk add --no-cache git bash curl
+
+# Install npm and npx from node_modules for package management
+COPY --from=node:22.21.0-alpine /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node:22.21.0-alpine /usr/local/bin/npx /usr/local/bin/npx
+
+# Install Claude Code CLI globally
+RUN npm install -g @anthropic-ai/claude-code
+
+# Add JavaScript dependencies for Claude Agent SDK to a separate location
+# Keep the original node_modules (has task-runner's core deps from pnpm)
+# Install our extras to /opt/extra-modules and add to NODE_PATH
+RUN mkdir -p /opt/extra-modules && \
+    cd /opt/extra-modules && \
+    npm init -y && \
+    npm install --legacy-peer-deps \
+    @anthropic-ai/claude-agent-sdk@latest \
+    @anthropic-ai/sdk@latest \
+    moment@2.30.1
+
+# Change default shell to bash (required by Claude Code)
+ENV SHELL=/bin/bash
+
+# Ensure claude is executable and create config directory for runner user
+RUN chmod +x /usr/local/bin/claude && \
+    mkdir -p /home/runner/.config/claude && \
+    chown -R runner:runner /home/runner/.config
+
+# Switch back to runner user
+USER runner
+WORKDIR /home/runner
+
+# Metadata
+LABEL org.opencontainers.image.title="n8n task runners with Claude Code" \
+      org.opencontainers.image.description="Extended n8n task runners image with Claude Code CLI and AI capabilities" \
+      org.opencontainers.image.source="https://github.com/dkindlund/n8n" \
+      org.opencontainers.image.url="https://n8n.io"

@@ -21,13 +21,13 @@ steps:
     env:
       - 'CI=true'
 
-  # Step 2: Build the Docker image with Kaniko
+  # Step 2: Build the base runners Docker image with Kaniko
   - name: 'gcr.io/kaniko-project/executor:latest'
-    id: 'build-docker-image'
+    id: 'build-base-image'
     args:
       - '--dockerfile=docker/images/runners/Dockerfile'
-      - '--destination=gcr.io/$PROJECT_ID/n8n-runners:$COMMIT_SHA'
-      - '--destination=gcr.io/$PROJECT_ID/n8n-runners:latest'
+      - '--destination=gcr.io/$PROJECT_ID/n8n-runners-base:$COMMIT_SHA'
+      - '--destination=gcr.io/$PROJECT_ID/n8n-runners-base:latest'
       - '--cache=true'
       - '--cache-ttl=168h'
       - '--build-arg=N8N_VERSION=$TAG_NAME'
@@ -35,6 +35,19 @@ steps:
       - '--build-arg=TARGETPLATFORM=linux/amd64'
       - '--context=dir:///workspace/'
     waitFor: ['build-artifacts']
+
+  # Step 3: Build the extended image with Claude Code
+  - name: 'gcr.io/kaniko-project/executor:latest'
+    id: 'build-extended-image'
+    args:
+      - '--dockerfile=docker/images/runners/Dockerfile.extended'
+      - '--destination=gcr.io/$PROJECT_ID/n8n-runners:$COMMIT_SHA'
+      - '--destination=gcr.io/$PROJECT_ID/n8n-runners:latest'
+      - '--cache=true'
+      - '--cache-ttl=168h'
+      - '--build-arg=BASE_IMAGE=gcr.io/$PROJECT_ID/n8n-runners-base:$COMMIT_SHA'
+      - '--context=dir:///workspace/'
+    waitFor: ['build-base-image']
 
 # Build timeout - 60 minutes
 timeout: '3600s'
