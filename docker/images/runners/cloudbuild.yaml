@@ -20,6 +20,7 @@ steps:
         ls -la dist/
     env:
       - 'CI=true'
+      - 'NODE_OPTIONS=--max-old-space-size=8192'
 
   # Step 2: Build the base runners Docker image with Kaniko
   - name: 'gcr.io/kaniko-project/executor:latest'
