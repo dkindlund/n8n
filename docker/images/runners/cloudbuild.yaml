@@ -57,4 +57,5 @@ timeout: '3600s'
 options:
   # Using default machine type (no machineType specified = N1_HIGHCPU_8)
   # diskSizeGb: 50  # Using default 100GB is fine, can reduce if needed
+  machineType: 'E2_HIGHCPU_8'
   logging: CLOUD_LOGGING_ONLY  # Reduces logs storage costs
