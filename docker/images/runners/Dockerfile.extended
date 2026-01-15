@@ -13,51 +13,52 @@
 
 ARG BASE_IMAGE=n8nio/runners:latest
 
-# Stage with full Alpine + Node.js to install tools and Claude Code
-FROM node:22.21.0-alpine AS tools-installer
+# Stage to install tools - using same Python Alpine base as runtime image
+# This ensures library compatibility (same Alpine version = compatible libraries)
+FROM python:3.13-alpine AS tools-installer
 
-# Install system dependencies
-RUN apk add --no-cache git bash curl
+# Install Node.js first (needed for npm and Claude Code CLI)
+RUN apk add --no-cache nodejs npm
+
+# Install comprehensive toolset for Claude Code static analysis
+# CRITICAL: Only install packages that DON'T replace busybox applets!
+#
+# Packages that corrupt busybox (create hardlinks to /bin/busybox):
+# ❌ grep, tar, gzip - hardlink /bin/busybox → breaks ALL applets
+# ❌ unzip - hardlink confirmed via testing (busybox became unzip)
+# ❌ findutils (find, xargs) - replace busybox applets
+# ❌ less - replace busybox applet
+# ❌ coreutils - would replace busybox (mkdir, chmod, etc.)
+#
+# When copied via Kaniko, hardlinks overwrite /bin/busybox in base image,
+# destroying all 300+ busybox applets (mkdir, chmod, rm, ls, cat, cp, mv, etc.)
+#
+# Safe packages (standalone binaries, NOT busybox applets):
+# ✅ git - Version control, too complex for busybox
+# ✅ bash - Full shell implementation
+# ✅ curl, wget - HTTP clients, standalone
+# ✅ ripgrep (rg) - Rust grep alternative, NOT in busybox
+# ✅ jq - JSON processor, NOT in busybox
+# ✅ make - Build tool, standalone
+#
+# For busybox applets (grep, find, tar, gzip, unzip, less, etc.):
+# Use base image's busybox versions via 'busybox --install' setup
+RUN apk add --no-cache \
+    git \
+    bash \
+    curl \
+    ripgrep \
+    jq \
+    make
+    # Removed wget - busybox applet (CONFIRMED via inode test: hardlinked to busybox)
+    # Removed tree, file - both are busybox applets that create hardlinks
+    # curl handles downloads, busybox provides wget/tree/file applets
 
 # Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
-FROM ${BASE_IMAGE}
-
-# Switch to root for installations
-USER root
-
-# Copy all necessary binaries and libraries from tools-installer
-# System tools
-COPY --from=tools-installer /usr/bin/git /usr/bin/git
-COPY --from=tools-installer /bin/bash /bin/bash
-COPY --from=tools-installer /usr/bin/curl /usr/bin/curl
-
-# Node.js npm/npx with dependencies
-COPY --from=tools-installer /usr/local/bin/npm /usr/local/bin/npm
-COPY --from=tools-installer /usr/local/bin/npx /usr/local/bin/npx
-COPY --from=tools-installer /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-
-# Claude Code CLI
-COPY --from=tools-installer /usr/local/lib/node_modules/@anthropic-ai/claude-code /usr/local/lib/node_modules/@anthropic-ai/claude-code
-COPY --from=tools-installer /usr/local/bin/claude /usr/local/bin/claude
-
-# Required libraries (selective copy to avoid conflicts)
-COPY --from=tools-installer /usr/lib/libcurl.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libnghttp2.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libidn2.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libssh2.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libbrotlidec.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libunistring.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libpsl.so.* /usr/lib/
-COPY --from=tools-installer /lib/libz.so.* /lib/
-COPY --from=tools-installer /usr/lib/libzstd.so.* /usr/lib/
-COPY --from=tools-installer /lib/libcrypto.so.* /lib/
-COPY --from=tools-installer /lib/libssl.so.* /lib/
-
-# Add JavaScript dependencies for Claude Agent SDK to a separate location
-# Keep the original node_modules (has task-runner's core deps from pnpm)
-# Install our extras to /opt/extra-modules and add to NODE_PATH
+# Install Claude Agent SDK and extra packages to separate directory
+# These will be copied to /opt/extra-modules in the final image
 RUN mkdir -p /opt/extra-modules && \
     cd /opt/extra-modules && \
     npm init -y && \
@@ -66,10 +67,128 @@ RUN mkdir -p /opt/extra-modules && \
     @anthropic-ai/sdk@latest \
     moment@2.30.1
 
+FROM ${BASE_IMAGE}
+
+# Switch to root for installations
+USER root
+
+# CRITICAL: Fix busybox corruption from base image
+# Base image has grep/tar/gzip hardlinked to corrupted busybox
+# Must DELETE corrupted hardlinks BEFORE copying clean busybox
+RUN rm -f /bin/grep /bin/egrep /bin/fgrep /bin/tar /bin/gzip /bin/gunzip /bin/zcat /bin/busybox || true
+
+# Copy clean busybox from tools-installer
+COPY --from=tools-installer /bin/busybox /bin/busybox
+
+# Create /tmp directory and reinstall all busybox applets using CLEAN busybox
+# Must be done BEFORE any library copies (Kaniko RUN bug)
+RUN mkdir -p /tmp && chmod 1777 /tmp && \
+    /bin/busybox --install -s /usr/bin
+
+# Copy all binaries from tools-installer
+# Note: Basic Unix utilities (mkdir, chmod, rm, etc.) are busybox applets,
+# not separate binaries. They're set up via 'busybox --install' in the RUN above.
+# Only copying tools that exist as real binaries:
+
+# Development tools from /usr/bin/ (ONLY verified standalone binaries)
+# Each tool verified via inode testing to ensure NOT hardlinked to busybox
+COPY --from=tools-installer /usr/bin/git /usr/bin/git
+COPY --from=tools-installer /usr/bin/curl /usr/bin/curl
+COPY --from=tools-installer /usr/bin/rg /usr/bin/rg
+COPY --from=tools-installer /usr/bin/jq /usr/bin/jq
+COPY --from=tools-installer /usr/bin/make /usr/bin/make
+
+# Git helper programs (CRITICAL for HTTPS/HTTP cloning)
+# git-remote-https, git-remote-http, and other protocol helpers
+COPY --from=tools-installer /usr/libexec/git-core /usr/libexec/git-core
+
+# Git templates (prevents "templates not found" warning)
+# Used when initializing new repos or cloning
+COPY --from=tools-installer /usr/share/git-core/templates /usr/share/git-core/templates
+
+# DO NOT COPY these (busybox applets - would corrupt /bin/busybox):
+# Verified via runtime inode testing - these are hardlinked to /bin/busybox:
+# - /usr/bin/wget (CONFIRMED: inode test showed hardlink to busybox)
+# - /usr/bin/tree (CONFIRMED: busybox became tree in test)
+# - /usr/bin/file (busybox applet)
+# - /usr/bin/unzip (CONFIRMED: busybox became unzip in earlier test)
+# - /usr/bin/find, /usr/bin/xargs (from findutils, busybox applets)
+# - /usr/bin/less (busybox applet)
+# Base image's busybox provides ALL of these via 'busybox --install' setup
+
+# ONLY copy bash from /bin/ - all other /bin/ tools are hardlinked to busybox!
+# In tools-installer, when apk packages (grep, tar, gzip, etc.) replace busybox applets,
+# they create hardlinks to /bin/busybox. Copying these would overwrite /bin/busybox
+# with the specific tool, breaking all 150+ busybox applets.
+# Base image's busybox versions of grep, tar, gzip work fine for our needs.
+COPY --from=tools-installer /bin/bash /bin/bash
+
+# DO NOT COPY from /bin/:
+# - /bin/grep (hardlinked to busybox → would break everything)
+# - /bin/tar (hardlinked to busybox → would break everything)
+# - /bin/gzip (hardlinked to busybox → would break everything)
+# Use base image's busybox applets instead
+
+# Node.js npm/npx (installed via apk in python:3.13-alpine)
+# Note: apk installs to /usr/bin, not /usr/local/bin like official node images
+COPY --from=tools-installer /usr/bin/npm /usr/bin/npm
+COPY --from=tools-installer /usr/bin/npx /usr/bin/npx
+# npm libraries are in /usr/lib when installed via apk
+COPY --from=tools-installer /usr/lib/node_modules/npm /usr/lib/node_modules/npm
+
+# Claude Code CLI with full dependencies
+COPY --from=tools-installer /usr/local/lib/node_modules/@anthropic-ai/claude-code /usr/local/lib/node_modules/@anthropic-ai/claude-code
+COPY --from=tools-installer /usr/local/bin/claude /usr/local/bin/claude
+
+# Copy ONLY libraries added by our tools (not already in python:3.13-alpine base)
+# Since tools-installer and base both use python:3.13-alpine, many libraries already exist
+# Copying identical libraries causes "too many links" symlink conflicts
+
+# CRITICAL: libpcre2 needed by /bin/sh and git (NOT in base python image!)
+COPY --from=tools-installer /usr/lib/libpcre2-8.so.* /usr/lib/
+
+# Network libraries (added by git, curl, wget packages)
+COPY --from=tools-installer /usr/lib/libcurl.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libnghttp2.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libnghttp3.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libngtcp2.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libngtcp2_crypto_quictls.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libev.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libidn2.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libunistring.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libcares.so.* /usr/lib/
+
+# Compression libraries (needed by curl for Brotli, Zstandard support)
+COPY --from=tools-installer /usr/lib/libbrotlidec.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libbrotlicommon.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libzstd.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libpsl.so.* /usr/lib/
+
+# Tool-specific libraries (added by jq, file packages)
+COPY --from=tools-installer /usr/lib/libjq.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libonig.so.* /usr/lib/
+COPY --from=tools-installer /usr/lib/libmagic.so.* /usr/lib/
+
+# Note: NOT copying these - already in python:3.13-alpine base:
+# - libssl, libcrypto (Python needs these, already installed)
+# - libstdc++ (C++ stdlib, already in base)
+# - libz, libbz2, liblzma (compression libs, already there)
+# Note: Also skipping libgcc_s, libssh2:
+# - libz: Already in base image (causes symlink conflicts)
+# - libbz2, liblzma: Not installed in tools-installer
+# - libgcc_s: Not in tools-installer /lib
+# - libssh2: Not installed (git doesn't need SSH for our use case)
+# Base image's compression libraries are sufficient
+
+# Copy JavaScript dependencies for Claude Agent SDK from tools-installer
+# These were installed in tools-installer to avoid Kaniko RUN issues
+COPY --from=tools-installer /opt/extra-modules /opt/extra-modules
+
 # Change default shell to bash (required by Claude Code)
 ENV SHELL=/bin/bash
 
-# Ensure claude is executable and create config directory for runner user
+# Ensure Claude CLI is executable and create config directory
+# Claude Code CLI requires ~/.config/claude to exist for storing session data
 RUN chmod +x /usr/local/bin/claude && \
     mkdir -p /home/runner/.config/claude && \
     chown -R runner:runner /home/runner/.config
