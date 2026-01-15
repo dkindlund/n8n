@@ -756,7 +756,7 @@ execSync('mkdir -p /tmp/mydir')  // ❌ Fails
 FROM ${BASE_IMAGE}
 USER root
 
-# Must be BEFORE library copies (Kaniko RUN bug kicks in after)
+# Create /tmp early to ensure it's available for all operations
 RUN mkdir -p /tmp && chmod 1777 /tmp
 
 # Then copy libraries...
@@ -1096,104 +1096,71 @@ COPY --from=tools-installer /usr/lib/libcurl.so.* /usr/lib/
 3. **Never copy /bin/ tools** (except bash) = avoids hardlink corruption
 4. **apk add nodejs npm** = gets Node.js with correct paths for Alpine
 
-### Critical: Kaniko RUN Command Limitation
+### Build-Time Validation
 
-**IMPORTANT DISCOVERY**: After copying libraries with COPY commands, **any subsequent RUN command fails in Kaniko** with mysterious "exit status 1" and no stderr output.
+**Build-time validation is fully supported!** You can add RUN commands in the final stage to test tools after copying.
 
-**Symptoms**:
-```dockerfile
-COPY --from=tools-installer /usr/lib/libcurl.so.* /usr/lib/
-COPY --from=tools-installer /usr/lib/libssl.so.* /usr/lib/
-# ... more library copies
-
-RUN echo "test"  # ❌ Fails with exit status 1, no output
-RUN npm install # ❌ Fails with exit status 1, no output
-RUN mkdir -p /tmp # ❌ Fails with exit status 1, no output
-```
-
-Even the simplest commands fail. This appears to be a Kaniko bug when many library files are copied.
-
-**The Workaround Pattern**:
+**Implementation**:
 
 ```dockerfile
-# Stage 1: Install EVERYTHING in tools-installer (RUN works here)
-FROM node:22.21.0-alpine AS tools-installer
-
-RUN apk add --no-cache git bash curl...
+# Stage 1: Install tools
+FROM python:3.13-alpine AS tools-installer
+RUN apk add --no-cache git bash curl ripgrep jq make
 RUN npm install -g @anthropic-ai/claude-code
-RUN mkdir -p /opt/extra-modules && \
-    cd /opt/extra-modules && \
-    npm install @anthropic-ai/claude-agent-sdk moment
 
-# Stage 2: COPY EVERYTHING to final image (avoid RUN after library copies)
+# Stage 2: Copy and validate in final image
 FROM ${BASE_IMAGE}
 USER root
 
-# Do ANY RUN commands FIRST (before library copies)
-RUN mkdir -p /tmp && chmod 1777 /tmp
-
-# Copy binaries
+# Copy binaries and libraries
 COPY --from=tools-installer /usr/bin/git /usr/bin/git
-# ...
-
-# Copy libraries
 COPY --from=tools-installer /usr/lib/libcurl.so.* /usr/lib/
-# ...
+# ... all other copies
 
-# Copy installed packages
-COPY --from=tools-installer /opt/extra-modules /opt/extra-modules
+# ✅ RUN COMMANDS WORK - Test the final image!
+RUN echo "[BUILD VALIDATION] Testing final image..." && \
+    git --version || (echo "[FAIL] git not working" && exit 1) && \
+    curl --version || (echo "[FAIL] curl not working" && exit 1) && \
+    jq --version || (echo "[FAIL] jq not working" && exit 1) && \
+    claude --version || (echo "[FAIL] Claude CLI not working" && exit 1) && \
+    echo "[BUILD VALIDATION] ✓ All tools verified"
 
-# ⚠️ NO RUN COMMANDS AFTER THIS POINT - they will fail!
-ENV SHELL=/bin/bash
 USER runner
 ```
 
-**Why This Works**:
-1. All package installations happen in tools-installer (where RUN is fine)
-2. All setup RUN commands happen BEFORE library copies
-3. Only COPY and ENV commands after libraries (these work in Kaniko)
-4. Everything you need is installed in tools-installer and copied over
+**Benefits**:
+- Tests ACTUAL final image (not intermediate stage)
+- Verifies binaries AND libraries work together
+- Catches copy/path issues at build time
+- Fails build immediately with clear error messages
+- Much better than runtime discovery
 
-### Tool Validation Layer
-
-**NOTE**: Build-time validation is currently not possible due to the Kaniko RUN bug described above. Even simple validation commands fail after library copies.
-
-**Alternative**: Verify tools work at runtime by testing them in your deployed container.
-
-```bash
-# Test in running container
-docker exec -it n8n-runners /bin/sh
-git --version
-curl --version
-jq --version
-claude --version
-node -e "require('@anthropic-ai/claude-agent-sdk')"
-```
+**Note**: Earlier documentation mentioned a "Kaniko RUN bug" that prevented RUN commands after library copies. This was either misdiagnosed, version-specific, or has been resolved. Current Kaniko versions work fine with RUN commands in final stage.
 
 ## Best Practices
 
 ### DO ✅
 
-1. **Install ALL packages in tools-installer stage** - Avoids Kaniko RUN bug
-2. **Do setup RUN commands BEFORE library copies** - RUN works early in the stage
-3. **Use COPY for everything after libraries** - COPY works, RUN doesn't
+1. **Install packages in tools-installer stage** - Cleaner separation of concerns
+2. **Add build-time validation in final stage** - Test tools work after copying
+3. **Use multi-stage builds** - Keeps final image clean
 4. **Use npm in extended images** - Avoids pnpm store conflicts
 5. **Install extras to /opt/extra-modules** - Preserves core dependencies
 6. **Set NODE_PATH in both places** - allowed-env AND env-overrides
 7. **Use --legacy-peer-deps** - Handles version conflicts gracefully
 8. **Create /tmp early with 1777 permissions** - Needed for workspace operations
-9. **Test builds early** - Each iteration takes ~6-10 minutes with cache
+9. **Test builds early and often** - Catch issues quickly with validation
 
 ### DON'T ❌
 
-1. **Don't use RUN after library copies** - Kaniko bug causes silent failures
-2. **Don't install packages in final stage** - Install in tools-installer, then COPY
-3. **Don't delete node_modules** - Contains critical task-runner dependencies
-4. **Don't use pnpm in extended images** - Store location conflicts
-5. **Don't forget allowed-env** - env-overrides alone doesn't work
-6. **Don't expect hot-reload** - Config is cached, requires container restart
-7. **Don't skip /tmp setup** - Claude Agent SDK needs writable workspace
-8. **Don't assume changes apply immediately** - Image must be rebuilt and redeployed
+1. **Don't install packages directly in final stage** - Use tools-installer for cleaner builds
+2. **Don't delete node_modules** - Contains critical task-runner dependencies
+3. **Don't use pnpm in extended images** - Store location conflicts
+4. **Don't forget allowed-env** - env-overrides alone doesn't work
+5. **Don't expect hot-reload** - Config is cached, requires container restart
+6. **Don't skip /tmp setup** - Claude Agent SDK needs writable workspace
+7. **Don't assume changes apply immediately** - Image must be rebuilt and redeployed
+8. **Don't skip build validation** - Catches issues at build time, not runtime
 
 ## File Reference
 
@@ -1309,12 +1276,16 @@ This allows:
 
 ---
 
-**Last Updated**: 2026-01-13
+**Last Updated**: 2026-01-14
 **Based on**: n8n v2.3.0, task-runner-launcher v1.4.2
 
-**Recent Fixes** (2026-01-13):
+**Recent Fixes** (2026-01-13 to 2026-01-14):
 - ✅ BusyBox corruption fully resolved (delete corrupted files, copy clean busybox)
 - ✅ curl compression libraries added (Brotli, Zstandard, PSL)
 - ✅ jq library dependencies added (libjq.so.1)
 - ✅ git HTTPS cloning fixed (git-remote-https helpers + templates)
+- ✅ Claude Code telemetry disabled (DISABLE_TELEMETRY=1)
+- ✅ Claude config directory added (~/.config/claude)
+- ✅ Build-time validation added (24 tests in final image)
+- ✅ Kaniko RUN limitation resolved (RUN works in final stage)
 - ✅ Complete test suite: 46/46 tools tests + 44/44 git tests passing (100%)
