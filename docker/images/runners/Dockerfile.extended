@@ -67,6 +67,41 @@ RUN mkdir -p /opt/extra-modules && \
     @anthropic-ai/sdk@latest \
     moment@2.30.1
 
+# ==============================================================================
+# BUILD-TIME VALIDATION - Test all tools before copying to final image
+# ==============================================================================
+# These tests catch installation issues at build time rather than runtime
+# If any tool fails, the build will fail with a clear error message
+
+RUN echo "[BUILD VALIDATION] Testing installed tools..." && \
+    # Test system tools
+    git --version || (echo "[FAIL] git not working" && exit 1) && \
+    bash --version || (echo "[FAIL] bash not working" && exit 1) && \
+    curl --version || (echo "[FAIL] curl not working" && exit 1) && \
+    jq --version || (echo "[FAIL] jq not working" && exit 1) && \
+    rg --version || (echo "[FAIL] ripgrep not working" && exit 1) && \
+    make --version || (echo "[FAIL] make not working" && exit 1) && \
+    # Test git HTTPS support (critical for cloning)
+    test -f /usr/libexec/git-core/git-remote-https || (echo "[FAIL] git-remote-https missing" && exit 1) && \
+    test -x /usr/libexec/git-core/git-remote-https || (echo "[FAIL] git-remote-https not executable" && exit 1) && \
+    # Test npm/npx
+    npm --version || (echo "[FAIL] npm not working" && exit 1) && \
+    npx --version || (echo "[FAIL] npx not working" && exit 1) && \
+    # Test Claude Code CLI
+    claude --version || (echo "[FAIL] Claude CLI not working" && exit 1) && \
+    # Test Node.js modules are installed
+    test -d /opt/extra-modules/node_modules/@anthropic-ai/claude-agent-sdk || (echo "[FAIL] Claude Agent SDK not installed" && exit 1) && \
+    test -d /opt/extra-modules/node_modules/@anthropic-ai/sdk || (echo "[FAIL] Anthropic SDK not installed" && exit 1) && \
+    test -d /opt/extra-modules/node_modules/moment || (echo "[FAIL] moment not installed" && exit 1) && \
+    # Test critical libraries exist
+    test -f /usr/lib/libpcre2-8.so.0 || (echo "[FAIL] libpcre2 missing" && exit 1) && \
+    test -f /usr/lib/libcurl.so.4 || (echo "[FAIL] libcurl missing" && exit 1) && \
+    test -f /usr/lib/libjq.so.1 || (echo "[FAIL] libjq missing" && exit 1) && \
+    test -f /usr/lib/libbrotlidec.so.1 || (echo "[FAIL] libbrotlidec missing" && exit 1) && \
+    test -f /usr/lib/libzstd.so.1 || (echo "[FAIL] libzstd missing" && exit 1) && \
+    test -f /usr/lib/libpsl.so.5 || (echo "[FAIL] libpsl missing" && exit 1) && \
+    echo "[BUILD VALIDATION] ✓ All tools and libraries verified successfully"
+
 FROM ${BASE_IMAGE}
 
 # Switch to root for installations
