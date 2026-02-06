@@ -117,6 +117,7 @@ import IconLucideFileOutput from '~icons/lucide/file-output';
 import IconLucideFileText from '~icons/lucide/file-text';
 import IconLucideFiles from '~icons/lucide/files';
 import IconLucideFingerprint from '~icons/lucide/fingerprint';
+import IconLucideFlame from '~icons/lucide/flame';
 import IconLucideFlaskConical from '~icons/lucide/flask-conical';
 import IconLucideFolder from '~icons/lucide/folder';
 import IconLucideFolderOpen from '~icons/lucide/folder-open';
@@ -195,6 +196,7 @@ import IconLucideServer from '~icons/lucide/server';
 import IconLucideSettings from '~icons/lucide/settings';
 import IconLucideSettings2 from '~icons/lucide/settings-2';
 import IconLucideShare from '~icons/lucide/share';
+import IconLucideShield from '~icons/lucide/shield';
 import IconLucideShieldHalf from '~icons/lucide/shield-half';
 import IconLucideSlidersHorizontal from '~icons/lucide/sliders-horizontal';
 import IconLucideSmile from '~icons/lucide/smile';
@@ -652,6 +654,7 @@ export const updatedIconSet = {
 	send: IconLucideSend,
 	server: IconLucideServer,
 	share: IconLucideShare,
+	shield: IconLucideShield,
 	'sliders-horizontal': IconLucideSlidersHorizontal,
 	'shield-half': IconLucideShieldHalf,
 	smile: IconLucideSmile,
@@ -696,6 +699,7 @@ export const updatedIconSet = {
 	'zoom-in': IconLucideZoomIn,
 	'zoom-out': IconLucideZoomOut,
 	loader: IconLucideLoader2,
+	'quick-connect': IconLucideFlame,
 } as const;
 
 export type IconName = keyof typeof updatedIconSet; // only new icon names should be used moving forward

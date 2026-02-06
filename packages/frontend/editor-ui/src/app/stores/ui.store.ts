@@ -6,7 +6,6 @@ import {
 	IMPORT_CURL_MODAL_KEY,
 	LOG_STREAM_MODAL_KEY,
 	MFA_SETUP_MODAL_KEY,
-	NODE_PINNING_MODAL_KEY,
 	NPS_SURVEY_MODAL_KEY,
 	VERSIONS_MODAL_KEY,
 	VIEWS,
@@ -60,6 +59,7 @@ import {
 import {
 	SOURCE_CONTROL_PUSH_MODAL_KEY,
 	SOURCE_CONTROL_PULL_MODAL_KEY,
+	SOURCE_CONTROL_PULL_RESULT_MODAL_KEY,
 } from '@/features/integrations/sourceControl.ee/sourceControl.constants';
 import { PROJECT_MOVE_RESOURCE_MODAL } from '@/features/collaboration/projects/projects.constants';
 import {
@@ -127,7 +127,6 @@ export const useUIStore = defineStore(STORES.UI, () => {
 				CREDENTIAL_SELECT_MODAL_KEY,
 				DUPLICATE_MODAL_KEY,
 				PERSONALIZATION_MODAL_KEY,
-				NODE_PINNING_MODAL_KEY,
 				INVITE_USER_MODAL_KEY,
 				TAGS_MANAGER_MODAL_KEY,
 				ANNOTATION_TAGS_MANAGER_MODAL_KEY,
@@ -141,6 +140,7 @@ export const useUIStore = defineStore(STORES.UI, () => {
 				PROMPT_MFA_CODE_MODAL_KEY,
 				SOURCE_CONTROL_PUSH_MODAL_KEY,
 				SOURCE_CONTROL_PULL_MODAL_KEY,
+				SOURCE_CONTROL_PULL_RESULT_MODAL_KEY,
 				EXTERNAL_SECRETS_PROVIDER_MODAL_KEY,
 				SECRETS_PROVIDER_CONNECTION_MODAL_KEY,
 				DEBUG_PAYWALL_MODAL_KEY,
@@ -263,7 +263,12 @@ export const useUIStore = defineStore(STORES.UI, () => {
 	});
 
 	const modalStack = ref<string[]>([]);
-	const sidebarMenuCollapsed = useLocalStorage<boolean>('sidebar.collapsed', true);
+	const sidebarMenuCollapsed = useLocalStorage<boolean | null>('sidebar.collapsed', null, {
+		serializer: {
+			read: (v) => (v === 'null' ? null : v === 'true'),
+			write: (v) => String(v),
+		},
+	});
 	const currentView = ref<string>('');
 	const stateIsDirty = ref<boolean>(false);
 	const dirtyStateSetCount = ref<number>(0);

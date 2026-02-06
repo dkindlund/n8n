@@ -9,6 +9,7 @@ import { useNpsSurveyStore } from '@/app/stores/npsSurvey.store';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
 import { useWorkflowsListStore } from '@/app/stores/workflowsList.store';
 import { useWorkflowAutosaveStore } from '@/app/stores/workflowAutosave.store';
+import { useBackendConnectionStore } from '@/app/stores/backendConnection.store';
 import type { WorkflowDataUpdate } from '@n8n/rest-api-client/api/workflows';
 import { mockedStore } from '@/__tests__/utils';
 import { createTestNode, createTestWorkflow, mockNodeTypeDescription } from '@/__tests__/mocks';
@@ -34,7 +35,6 @@ vi.mock('@n8n/permissions', () => ({
 const mockWorkflowState = {
 	setWorkflowProperty: vi.fn(),
 	setWorkflowName: vi.fn(),
-	setWorkflowTagIds: vi.fn(),
 	setActive: vi.fn(),
 	setWorkflowId: vi.fn(),
 	setWorkflowSettings: vi.fn(),
@@ -95,6 +95,7 @@ describe('useWorkflowSaving', () => {
 	let workflowsStore: ReturnType<typeof mockedStore<typeof useWorkflowsStore>>;
 	let workflowsListStore: ReturnType<typeof mockedStore<typeof useWorkflowsListStore>>;
 	let nodeTypesStore: ReturnType<typeof mockedStore<typeof useNodeTypesStore>>;
+	let backendConnectionStore: ReturnType<typeof useBackendConnectionStore>;
 
 	afterEach(() => {
 		vi.clearAllMocks();
@@ -114,6 +115,9 @@ describe('useWorkflowSaving', () => {
 				group: ['trigger'],
 			}),
 		]);
+
+		backendConnectionStore = useBackendConnectionStore();
+		backendConnectionStore.setOnline(true);
 	});
 
 	describe('promptSaveUnsavedWorkflowChanges', () => {
@@ -150,9 +154,8 @@ describe('useWorkflowSaving', () => {
 			modalConfirmSpy.mockResolvedValue(MODAL_CONFIRM);
 
 			const mockWorkflowState: Partial<WorkflowState> = {
-				setWorkflowTagIds: vi.fn(),
 				setWorkflowName: vi.fn(),
-				setWorkflowProperty: vi.fn(), // Add missing method
+				setWorkflowProperty: vi.fn(),
 			};
 
 			const resolveSpy = vi.fn();
@@ -557,9 +560,7 @@ describe('useWorkflowSaving', () => {
 			workflowsListStore.workflowsById = { [workflow.id]: workflow };
 			workflowsStore.workflowId = workflow.id;
 
-			const setWorkflowTagIdsSpy = vi.fn();
 			const mockWorkflowState: Partial<WorkflowState> = {
-				setWorkflowTagIds: setWorkflowTagIdsSpy,
 				setWorkflowName: vi.fn(),
 				setWorkflowProperty: vi.fn(),
 			};
@@ -571,7 +572,12 @@ describe('useWorkflowSaving', () => {
 
 			await saveCurrentWorkflow({ id: 'w5', tags: ['tag1', 'tag2'] }, true, false, false);
 
-			expect(setWorkflowTagIdsSpy).toHaveBeenCalledWith(['tag1', 'tag2']);
+			// Tags are now managed by workflowDocumentStore, not workflowState
+			expect(workflowsStore.updateWorkflow).toHaveBeenCalledWith(
+				'w5',
+				expect.objectContaining({ tags: ['tag1', 'tag2'] }),
+				false,
+			);
 		});
 	});
 
@@ -632,7 +638,6 @@ describe('useWorkflowSaving', () => {
 			const initialDirtyCount = uiStore.dirtyStateSetCount;
 
 			const mockWorkflowState: Partial<WorkflowState> = {
-				setWorkflowTagIds: vi.fn(),
 				setWorkflowName: vi.fn(),
 				setWorkflowProperty: vi.fn(),
 			};
@@ -682,7 +687,6 @@ describe('useWorkflowSaving', () => {
 			uiStore.markStateDirty();
 
 			const mockWorkflowState: Partial<WorkflowState> = {
-				setWorkflowTagIds: vi.fn(),
 				setWorkflowName: vi.fn(),
 				setWorkflowProperty: vi.fn(),
 			};
@@ -719,7 +723,6 @@ describe('useWorkflowSaving', () => {
 			const uiStore = useUIStore();
 
 			const mockWorkflowState: Partial<WorkflowState> = {
-				setWorkflowTagIds: vi.fn(),
 				setWorkflowName: vi.fn(),
 				setWorkflowProperty: vi.fn(),
 			};
@@ -740,6 +743,20 @@ describe('useWorkflowSaving', () => {
 
 			// updateWorkflow should NOT have been called since we skipped
 			expect(workflowsStore.updateWorkflow).not.toHaveBeenCalled();
+		});
+
+		it('should not schedule autosave when network is offline', () => {
+			const autosaveStore = useWorkflowAutosaveStore();
+
+			backendConnectionStore.setOnline(false);
+			autosaveStore.reset();
+
+			const { autoSaveWorkflow } = useWorkflowSaving({ router });
+
+			// Try to schedule autosave while offline
+			autoSaveWorkflow();
+
+			expect(autosaveStore.autoSaveState).toBe(AutoSaveState.Idle);
 		});
 	});
 });

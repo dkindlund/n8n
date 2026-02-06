@@ -1,3 +1,4 @@
+import { UpdateWorkflowHistoryVersionDto } from '@n8n/api-types';
 import { LicenseState, Logger } from '@n8n/backend-common';
 import { GlobalConfig } from '@n8n/config';
 import type {
@@ -5,7 +6,6 @@ import type {
 	WorkflowEntity,
 	ListQueryDb,
 	WorkflowFolderUnionFull,
-	WorkflowHistoryUpdate,
 	WorkflowHistory,
 } from '@n8n/db';
 import {
@@ -16,9 +16,11 @@ import {
 	SharedWorkflowRepository,
 	WorkflowRepository,
 	WorkflowPublishHistoryRepository,
+	ProjectRepository,
 } from '@n8n/db';
 import { Container, Service } from '@n8n/di';
 import type { Scope } from '@n8n/permissions';
+import { hasGlobalScope } from '@n8n/permissions';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import type { EntityManager } from '@n8n/typeorm';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
@@ -91,6 +93,7 @@ export class WorkflowService {
 		private readonly nodeTypes: NodeTypes,
 		private readonly webhookService: WebhookService,
 		private readonly licenseState: LicenseState,
+		private readonly projectRepository: ProjectRepository,
 	) {}
 
 	async getMany(
@@ -106,17 +109,28 @@ export class WorkflowService {
 		let workflowsAndFolders: WorkflowFolderUnionFull[] = [];
 		let sharedWorkflowIds: string[] = [];
 		let isPersonalProject = false;
+		let personalProjectOwnerId: string | null = null;
 
 		if (options?.filter?.projectId) {
-			const projects = await this.projectService.getProjectRelationsForUser(user);
-			isPersonalProject = !!projects.find(
-				(p) => p.project.id === options.filter?.projectId && p.project.type === 'personal',
-			);
+			const project = await this.projectRepository.findOneBy({
+				id: options.filter.projectId as string,
+			});
+			if (!project) {
+				return { workflows: [], count: 0 };
+			}
+			isPersonalProject = project.type === 'personal';
+			personalProjectOwnerId = project.creatorId;
 		}
 
-		if (isPersonalProject) {
+		if (isPersonalProject && personalProjectOwnerId) {
+			if (personalProjectOwnerId !== user.id && !hasGlobalScope(user, 'workflow:read')) {
+				return { workflows: [], count: 0 };
+			}
+
 			sharedWorkflowIds =
-				await this.workflowSharingService.getOwnedWorkflowsInPersonalProject(user);
+				await this.workflowSharingService.getOwnedWorkflowsInPersonalProject(
+					personalProjectOwnerId,
+				);
 		} else if (onlySharedWithMe) {
 			sharedWorkflowIds = await this.workflowSharingService.getSharedWithMeIds(user);
 		} else {
@@ -285,12 +299,9 @@ export class WorkflowService {
 			aiBuilderAssisted = false,
 			autosaved = false,
 		} = options;
-		const workflow = await this.workflowFinderService.findWorkflowForUser(
-			workflowId,
-			user,
-			['workflow:update'],
-			{ includeActiveVersion: true },
-		);
+		const workflow = await this.workflowFinderService.findWorkflowForUser(workflowId, user, [
+			'workflow:update',
+		]);
 
 		if (!workflow) {
 			this.logger.warn('User attempted to update a workflow without permissions', {
@@ -595,12 +606,9 @@ export class WorkflowService {
 		},
 		publicApi: boolean = false,
 	): Promise<WorkflowEntity> {
-		const workflow = await this.workflowFinderService.findWorkflowForUser(
-			workflowId,
-			user,
-			['workflow:publish'],
-			{ includeActiveVersion: true },
-		);
+		const workflow = await this.workflowFinderService.findWorkflowForUser(workflowId, user, [
+			'workflow:publish',
+		]);
 
 		if (!workflow) {
 			this.logger.warn('User attempted to activate a workflow without permissions', {
@@ -683,12 +691,12 @@ export class WorkflowService {
 		);
 
 		if (options?.name !== undefined || options?.description !== undefined) {
-			const updateFields: WorkflowHistoryUpdate = {};
+			const updateFields: UpdateWorkflowHistoryVersionDto = {};
 			if (options.name !== undefined) updateFields.name = options.name;
 			if (options.description !== undefined) updateFields.description = options.description;
 			await this.workflowHistoryService.updateVersion(
-				versionIdToActivate,
 				workflowId,
+				versionIdToActivate,
 				updateFields,
 			);
 		}
@@ -714,20 +722,17 @@ export class WorkflowService {
 	 * Deactivates a workflow by removing it from the active workflow manager and setting activeVersionId to null.
 	 * @param user - The user deactivating the workflow
 	 * @param workflowId - The ID of the workflow to deactivate
-	 * @param publicApi - Whether this is called from the public API (affects event emission)
+	 * @param options - Optional settings including expectedChecksum for conflict detection and publicApi flag
 	 * @returns The deactivated workflow
 	 */
 	async deactivateWorkflow(
 		user: User,
 		workflowId: string,
-		publicApi: boolean = false,
+		options?: { expectedChecksum?: string; publicApi?: boolean },
 	): Promise<WorkflowEntity> {
-		const workflow = await this.workflowFinderService.findWorkflowForUser(
-			workflowId,
-			user,
-			['workflow:publish'],
-			{ includeActiveVersion: true },
-		);
+		const workflow = await this.workflowFinderService.findWorkflowForUser(workflowId, user, [
+			'workflow:unpublish',
+		]);
 
 		if (!workflow) {
 			this.logger.warn('User attempted to deactivate a workflow without permissions', {
@@ -741,6 +746,10 @@ export class WorkflowService {
 
 		if (workflow.activeVersionId === null) {
 			return workflow;
+		}
+
+		if (options?.expectedChecksum) {
+			await this._detectConflicts(workflow, options.expectedChecksum);
 		}
 
 		// Remove from active workflow manager
@@ -769,7 +778,7 @@ export class WorkflowService {
 			user,
 			workflowId,
 			workflow,
-			publicApi,
+			publicApi: options?.publicApi ?? false,
 		});
 
 		return workflow;
@@ -823,7 +832,7 @@ export class WorkflowService {
 	async archive(
 		user: User,
 		workflowId: string,
-		skipArchived: boolean = false,
+		options?: { skipArchived?: boolean; expectedChecksum?: string },
 	): Promise<WorkflowEntity | undefined> {
 		const workflow = await this.workflowFinderService.findWorkflowForUser(workflowId, user, [
 			'workflow:delete',
@@ -834,11 +843,15 @@ export class WorkflowService {
 		}
 
 		if (workflow.isArchived) {
-			if (skipArchived) {
+			if (options?.skipArchived) {
 				return workflow;
 			}
 
 			throw new BadRequestError('Workflow is already archived.');
+		}
+
+		if (options?.expectedChecksum) {
+			await this._detectConflicts(workflow, options.expectedChecksum);
 		}
 
 		if (workflow.activeVersionId !== null) {

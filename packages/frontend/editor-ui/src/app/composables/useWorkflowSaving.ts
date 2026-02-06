@@ -1,6 +1,7 @@
 import { useNpsSurveyStore } from '@/app/stores/npsSurvey.store';
 import { useUIStore } from '@/app/stores/ui.store';
 import type { LocationQuery, NavigationGuardNext, useRouter } from 'vue-router';
+import { watch } from 'vue';
 import { useMessage } from './useMessage';
 import { useI18n } from '@n8n/i18n';
 import {
@@ -34,6 +35,11 @@ import { getResourcePermissions } from '@n8n/permissions';
 import { useDebounceFn } from '@vueuse/core';
 import { useBuilderStore } from '@/features/ai/assistant/builder.store';
 import { useWorkflowAutosaveStore } from '@/app/stores/workflowAutosave.store';
+import { useBackendConnectionStore } from '@/app/stores/backendConnection.store';
+import {
+	useWorkflowDocumentStore,
+	createWorkflowDocumentId,
+} from '@/app/stores/workflowDocument.store';
 
 export function useWorkflowSaving({
 	router,
@@ -62,6 +68,7 @@ export function useWorkflowSaving({
 		useWorkflowHelpers();
 
 	const autosaveStore = useWorkflowAutosaveStore();
+	const backendConnectionStore = useBackendConnectionStore();
 
 	async function promptSaveUnsavedWorkflowChanges(
 		next: NavigationGuardNext,
@@ -230,7 +237,10 @@ export function useWorkflowSaving({
 			}
 
 			if (tags) {
-				workflowState.setWorkflowTagIds(convertWorkflowTagsToIds(workflowData.tags));
+				const tagIds = convertWorkflowTagsToIds(workflowData.tags);
+				const workflowDocumentId = createWorkflowDocumentId(currentWorkflow);
+				const workflowDocumentStore = useWorkflowDocumentStore(workflowDocumentId);
+				workflowDocumentStore.setTags(tagIds);
 			}
 
 			// Only mark state clean if no new changes were made during the save
@@ -460,7 +470,10 @@ export function useWorkflowSaving({
 				workflowState.setNodeValue(changes);
 			});
 
-			workflowState.setWorkflowTagIds(convertWorkflowTagsToIds(workflowData.tags));
+			const tagIds = convertWorkflowTagsToIds(workflowData.tags);
+			const workflowDocumentId = createWorkflowDocumentId(workflowData.id);
+			const workflowDocumentStore = useWorkflowDocumentStore(workflowDocumentId);
+			workflowDocumentStore.setTags(tagIds);
 
 			const route = router.currentRoute.value;
 			const templateId = route.query.templateId;
@@ -544,6 +557,11 @@ export function useWorkflowSaving({
 			return;
 		}
 
+		// Don't schedule if we're offline
+		if (!backendConnectionStore.isOnline) {
+			return;
+		}
+
 		autosaveStore.setAutoSaveState(AutoSaveState.Scheduled);
 		void autoSaveWorkflowDebounced();
 	};
@@ -554,6 +572,18 @@ export function useWorkflowSaving({
 		}
 		autosaveStore.setAutoSaveState(AutoSaveState.Idle);
 	};
+
+	// Watch for network coming back online
+	watch(
+		() => backendConnectionStore.isOnline,
+		(isOnline, wasOnline) => {
+			if (isOnline && !wasOnline) {
+				if (uiStore.stateIsDirty) {
+					scheduleAutoSave();
+				}
+			}
+		},
+	);
 
 	return {
 		promptSaveUnsavedWorkflowChanges,
