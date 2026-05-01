@@ -1,4 +1,8 @@
-import type { NodeProperty, NodeTypeDescription } from './generate-types';
+import {
+	narrowDisplayOptionsByDisabled,
+	type NodeProperty,
+	type NodeTypeDescription,
+} from './generate-types';
 import {
 	generateConditionalSchemaLine,
 	generateSingleVersionSchemaFile,
@@ -8,6 +12,7 @@ import {
 	isPropertyOptional,
 	mapPropertyToZodSchema,
 	mergeDisplayOptions,
+	mergePropertiesByName,
 	extractDefaultsForDisplayOptions,
 } from './generate-zod-schemas';
 
@@ -482,6 +487,71 @@ describe('extractDefaultsForDisplayOptions', () => {
 	it('returns empty object for empty displayOptions', () => {
 		const defaults = extractDefaultsForDisplayOptions({}, []);
 		expect(defaults).toEqual({});
+	});
+});
+
+describe('mapPropertyToZodSchema for multipleValues', () => {
+	it('wraps repeatable string fields in an array schema', () => {
+		const prop: NodeProperty = {
+			name: 'attendees',
+			displayName: 'Attendees',
+			type: 'string',
+			default: '',
+			typeOptions: {
+				multipleValues: true,
+			},
+		};
+
+		const schema = mapPropertyToZodSchema(prop);
+
+		expect(schema).toBe('z.array(stringOrExpression)');
+	});
+
+	it('applies noDataExpression to repeatable fields before wrapping the array schema', () => {
+		const prop: NodeProperty = {
+			name: 'resource',
+			displayName: 'Resource',
+			type: 'string',
+			default: '',
+			noDataExpression: true,
+			typeOptions: {
+				multipleValues: true,
+			},
+		};
+
+		const schema = mapPropertyToZodSchema(prop);
+
+		expect(schema).toBe('z.array(z.string())');
+	});
+
+	it('wraps nested repeatable string fields in an array schema', () => {
+		const prop: NodeProperty = {
+			name: 'attendeesUi',
+			displayName: 'Attendees',
+			type: 'fixedCollection',
+			default: {},
+			options: [
+				{
+					name: 'values',
+					displayName: 'Values',
+					values: [
+						{
+							name: 'attendees',
+							displayName: 'Attendees',
+							type: 'string',
+							default: '',
+							typeOptions: {
+								multipleValues: true,
+							},
+						},
+					],
+				},
+			],
+		};
+
+		const schema = mapPropertyToZodSchema(prop);
+
+		expect(schema).toContain('attendees: z.array(stringOrExpression).optional()');
 	});
 });
 
@@ -1345,6 +1415,340 @@ describe('mapPropertyToZodSchema with noDataExpression', () => {
 		};
 		const schema = mapPropertyToZodSchema(prop);
 		expect(schema).toBe('stringOrExpression');
+	});
+});
+
+describe('narrowDisplayOptionsByDisabled', () => {
+	it('returns inputs unchanged when the property has no disabledOptions', () => {
+		const prop: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Session Key',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { sessionIdType: ['customKey'] } },
+		};
+
+		const result = narrowDisplayOptionsByDisabled(prop);
+
+		expect(result.fullyDisabled).toBe(false);
+		expect(result.displayOptions).toEqual({ show: { sessionIdType: ['customKey'] } });
+	});
+
+	it('flags the property as fully disabled when all visible states are disabled', () => {
+		const prop: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Session Key',
+			type: 'string',
+			default: '={{ $json.sessionId }}',
+			displayOptions: { show: { sessionIdType: ['fromInput'] } },
+			disabledOptions: { show: { sessionIdType: ['fromInput'] } },
+		};
+
+		const result = narrowDisplayOptionsByDisabled(prop);
+
+		expect(result.fullyDisabled).toBe(true);
+		expect(result.displayOptions).toBeUndefined();
+	});
+
+	it('removes only the disabled values and keeps the remaining visible states', () => {
+		const prop: NodeProperty = {
+			name: 'text',
+			displayName: 'Text',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { promptType: ['auto', 'define', 'guardrails'] } },
+			disabledOptions: { show: { promptType: ['auto', 'guardrails'] } },
+		};
+
+		const result = narrowDisplayOptionsByDisabled(prop);
+
+		expect(result.fullyDisabled).toBe(false);
+		expect(result.displayOptions).toEqual({ show: { promptType: ['define'] } });
+	});
+
+	it('converts disabledOptions on keys absent from displayOptions.show into hide constraints', () => {
+		const prop: NodeProperty = {
+			name: 'field',
+			displayName: 'Field',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { mode: ['a'] } },
+			disabledOptions: { show: { otherField: ['x'] } },
+		};
+
+		const result = narrowDisplayOptionsByDisabled(prop);
+
+		expect(result.fullyDisabled).toBe(false);
+		expect(result.displayOptions).toEqual({
+			show: { mode: ['a'] },
+			hide: { otherField: ['x'] },
+		});
+	});
+
+	it('converts disabledOptions into hide when the property has no displayOptions.show', () => {
+		const prop: NodeProperty = {
+			name: 'inputType',
+			displayName: 'Input Type',
+			type: 'options',
+			default: 'binary',
+			disabledOptions: { show: { 'options.batch': [true] } },
+		};
+
+		const result = narrowDisplayOptionsByDisabled(prop);
+
+		expect(result.fullyDisabled).toBe(false);
+		expect(result.displayOptions).toEqual({ hide: { 'options.batch': [true] } });
+	});
+
+	it('merges disabledOptions into an existing displayOptions.hide for the same key', () => {
+		const prop: NodeProperty = {
+			name: 'field',
+			displayName: 'Field',
+			type: 'string',
+			default: '',
+			displayOptions: { hide: { mode: ['x'] } },
+			disabledOptions: { show: { mode: ['y'] } },
+		};
+
+		const result = narrowDisplayOptionsByDisabled(prop);
+
+		expect(result.fullyDisabled).toBe(false);
+		expect(result.displayOptions).toEqual({ hide: { mode: ['x', 'y'] } });
+	});
+
+	it('does not mutate the original displayOptions.hide when merging', () => {
+		const originalHide = { mode: ['x'] };
+		const prop: NodeProperty = {
+			name: 'field',
+			displayName: 'Field',
+			type: 'string',
+			default: '',
+			displayOptions: { hide: originalHide },
+			disabledOptions: { show: { mode: ['y'] } },
+		};
+
+		narrowDisplayOptionsByDisabled(prop);
+
+		expect(originalHide).toEqual({ mode: ['x'] });
+	});
+});
+
+describe('mergePropertiesByName with disabledOptions', () => {
+	it('drops the fully-disabled sessionKey variant so only the editable one survives', () => {
+		const expressionSessionKey: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Session Key From Previous Node',
+			type: 'string',
+			default: '={{ $json.sessionId }}',
+			displayOptions: { show: { sessionIdType: ['fromInput'] } },
+			disabledOptions: { show: { sessionIdType: ['fromInput'] } },
+		};
+		const editableSessionKey: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Key',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { sessionIdType: ['customKey'] } },
+		};
+
+		const merged = mergePropertiesByName([expressionSessionKey, editableSessionKey]);
+
+		const variants = merged.get('sessionKey');
+		expect(variants).toBeDefined();
+		expect(variants).toHaveLength(1);
+		expect(variants?.[0].displayOptions).toEqual({ show: { sessionIdType: ['customKey'] } });
+	});
+
+	it('produces the same narrowed result regardless of property ordering', () => {
+		const expressionSessionKey: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Session Key From Previous Node',
+			type: 'string',
+			default: '={{ $json.sessionId }}',
+			displayOptions: { show: { sessionIdType: ['fromInput'] } },
+			disabledOptions: { show: { sessionIdType: ['fromInput'] } },
+		};
+		const editableSessionKey: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Key',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { sessionIdType: ['customKey'] } },
+		};
+
+		const mergedA = mergePropertiesByName([expressionSessionKey, editableSessionKey]);
+		const mergedB = mergePropertiesByName([editableSessionKey, expressionSessionKey]);
+
+		expect(mergedA.get('sessionKey')).toHaveLength(1);
+		expect(mergedA.get('sessionKey')?.[0].displayOptions).toEqual({
+			show: { sessionIdType: ['customKey'] },
+		});
+		expect(mergedB.get('sessionKey')).toHaveLength(1);
+		expect(mergedB.get('sessionKey')?.[0].displayOptions).toEqual({
+			show: { sessionIdType: ['customKey'] },
+		});
+	});
+
+	it('drops a property entirely when every duplicate is fully disabled', () => {
+		const first: NodeProperty = {
+			name: 'lockedField',
+			displayName: 'Locked Field',
+			type: 'string',
+			default: 'A',
+			displayOptions: { show: { mode: ['a'] } },
+			disabledOptions: { show: { mode: ['a'] } },
+		};
+		const second: NodeProperty = {
+			name: 'lockedField',
+			displayName: 'Locked Field',
+			type: 'string',
+			default: 'B',
+			displayOptions: { show: { mode: ['b'] } },
+			disabledOptions: { show: { mode: ['b'] } },
+		};
+
+		const merged = mergePropertiesByName([first, second]);
+
+		expect(merged.has('lockedField')).toBe(false);
+	});
+
+	it('keeps the merged schema emitting only settable states when generating code', () => {
+		const expressionSessionKey: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Session Key From Previous Node',
+			type: 'string',
+			default: '={{ $json.sessionId }}',
+			displayOptions: { show: { sessionIdType: ['fromInput'] } },
+			disabledOptions: { show: { sessionIdType: ['fromInput'] } },
+		};
+		const editableSessionKey: NodeProperty = {
+			name: 'sessionKey',
+			displayName: 'Key',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { sessionIdType: ['customKey'] } },
+		};
+
+		const merged = mergePropertiesByName([expressionSessionKey, editableSessionKey]);
+		const line = generateConditionalSchemaLine(merged.get('sessionKey')![0], [
+			{
+				name: 'sessionIdType',
+				displayName: 'Session ID',
+				type: 'options',
+				default: 'fromInput',
+			},
+		]);
+
+		expect(line).toContain('displayOptions: {"show":{"sessionIdType":["customKey"]}}');
+		expect(line).not.toMatch(/"show":\{[^}]*"fromInput"/);
+	});
+});
+
+describe('mergePropertiesByName with UX-fork variants', () => {
+	it('keeps two BigQuery-shaped sqlQuery declarations as separate variants', () => {
+		const sqlQueryStandard: NodeProperty = {
+			name: 'sqlQuery',
+			displayName: 'Query',
+			type: 'string',
+			default: '',
+			displayOptions: { hide: { '/options.useLegacySql': [true] } },
+		};
+		const sqlQueryLegacy: NodeProperty = {
+			name: 'sqlQuery',
+			displayName: 'Legacy SQL Query',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { '/options.useLegacySql': [true] } },
+		};
+
+		const merged = mergePropertiesByName([sqlQueryStandard, sqlQueryLegacy]);
+		const variants = merged.get('sqlQuery');
+		expect(variants).toHaveLength(2);
+		expect(variants?.[0].displayOptions).toEqual({
+			hide: { '/options.useLegacySql': [true] },
+		});
+		expect(variants?.[1].displayOptions).toEqual({
+			show: { '/options.useLegacySql': [true] },
+		});
+	});
+
+	it('collapses true duplicates (deep-equal displayOptions) into one variant with merged options', () => {
+		const collectionA: NodeProperty = {
+			name: 'options',
+			displayName: 'Options',
+			type: 'collection',
+			default: {},
+			displayOptions: { show: { mode: ['x'] } },
+			options: [{ name: 'optA', displayName: 'A' }],
+		};
+		const collectionB: NodeProperty = {
+			name: 'options',
+			displayName: 'Options',
+			type: 'collection',
+			default: {},
+			displayOptions: { show: { mode: ['x'] } },
+			options: [{ name: 'optB', displayName: 'B' }],
+		};
+
+		const merged = mergePropertiesByName([collectionA, collectionB]);
+		const variants = merged.get('options');
+		expect(variants).toHaveLength(1);
+		const optionNames = (variants?.[0].options ?? []).map((o) => o.name);
+		expect(optionNames).toEqual(['optA', 'optB']);
+	});
+});
+
+describe('generateOneOfSchemaLine + generateParameterEntryLine', () => {
+	it('emits resolveOneOfSchemas for a BigQuery-shaped sqlQuery fork', () => {
+		const sqlQueryStandard: NodeProperty = {
+			name: 'sqlQuery',
+			displayName: 'Query',
+			type: 'string',
+			default: '',
+			displayOptions: { hide: { '/options.useLegacySql': [true] } },
+		};
+		const sqlQueryLegacy: NodeProperty = {
+			name: 'sqlQuery',
+			displayName: 'Legacy SQL Query',
+			type: 'string',
+			default: '',
+			displayOptions: { show: { '/options.useLegacySql': [true] } },
+		};
+		const useLegacySql: NodeProperty = {
+			name: 'useLegacySql',
+			displayName: 'Use Legacy SQL',
+			type: 'boolean',
+			default: false,
+		};
+
+		const merged = mergePropertiesByName([sqlQueryStandard, sqlQueryLegacy, useLegacySql]);
+		const allFlat = Array.from(merged.values()).flat();
+		// The relevant entry is sqlQuery (multi-variant)
+		const sqlVariants = merged.get('sqlQuery')!;
+		// Use the public emit path to confirm a oneOf line is produced
+		const file = generateSingleVersionSchemaFile(
+			{
+				name: 'bigQuery',
+				displayName: 'BigQuery',
+				group: ['transform'],
+				version: 1,
+				inputs: ['main'],
+				outputs: ['main'],
+				properties: [sqlQueryStandard, sqlQueryLegacy, useLegacySql],
+			},
+			1,
+		);
+
+		expect(file).toContain('resolveOneOfSchemas');
+		// Both variants serialized into the variants array
+		expect(file).toMatch(/"hide":\{"\/options\.useLegacySql":\[true\]\}/);
+		expect(file).toMatch(/"show":\{"\/options\.useLegacySql":\[true\]\}/);
+		// And the helper is registered
+		expect(file).toMatch(/function getSchema\(\{[^}]*resolveOneOfSchemas[^}]*\}\)/);
+
+		// Also exercise the merged map directly
+		expect(sqlVariants).toHaveLength(2);
+		expect(allFlat).toHaveLength(3);
 	});
 });
 
