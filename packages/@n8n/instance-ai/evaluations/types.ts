@@ -145,6 +145,9 @@ export interface EventOutcome {
 	workflowIds: string[];
 	executionIds: string[];
 	dataTableIds: string[];
+	/** Non-workflow artifact references (agent, config-eval) captured from the tool-result
+	 *  stream — `create_agent`'s agentId and `eval-config` create's owning workflow id. */
+	artifactRefs: ArtifactRef[];
 	finalText: string;
 	toolCalls: CapturedToolCall[];
 	agentActivities: AgentActivity[];
@@ -159,6 +162,18 @@ export interface BuildTrace {
 // ---------------------------------------------------------------------------
 // Workflow evaluation test cases
 // ---------------------------------------------------------------------------
+
+/** Artifact kinds an eval case can expect a build to produce. */
+export const ARTIFACT_TYPES = ['workflow', 'agent', 'config-eval'] as const;
+export type ArtifactType = (typeof ARTIFACT_TYPES)[number];
+
+/** A discovered-but-not-yet-fetched artifact reference. Lives here (not in
+ *  harness/artifacts/types) so `outcome/` can produce it without importing back
+ *  into `harness/` — that direction is a cycle (harness already imports outcome/). */
+export interface ArtifactRef {
+	type: ArtifactType;
+	id: string;
+}
 
 export interface ExecutionScenario {
 	name: string;
@@ -202,8 +217,11 @@ export interface WorkflowTestCase {
 	 *  ordering). LLM-judged from the transcript; requires a transcript, so skipped in
 	 *  prebuilt/MCP runs. Counted toward the per-case + headline pass rate alongside scenarios. */
 	processExpectations?: string[];
-	/** Optional NL assertions about the resulting WORKFLOW (outcome). LLM-judged from the workflow,
-	 *  so they also run in prebuilt/MCP runs. Counted toward the pass rate alongside scenarios. */
+	/** Optional NL assertions about the resulting WORKFLOW (outcome). LLM-judged from the workflow —
+	 *  and, when the build produced a non-workflow artifact (agent, config-eval), from the rendered
+	 *  agent/config-eval context injected into the judge. So they also cover artifact existence,
+	 *  absence and content ("an agent was created and no workflow", "the agent instructions mention
+	 *  escalating refunds"). Also run in prebuilt/MCP runs. Counted toward the pass rate. */
 	outcomeExpectations?: string[];
 	/**
 	 * Credentials visible to this case's build. Created for real before the build
@@ -408,6 +426,15 @@ export interface BuildExpectationAggregation {
 	passHatK: number[];
 }
 
+/**
+ * Whether a case produced any scoreable verdict across its runs.
+ * - `verified`  — at least one scenario or build expectation was evaluated.
+ * - `notVerified` — every measured unit came back incomplete / was skipped (no
+ *   transcript for process expectations, verifier gaps for scenarios), so nothing
+ *   could actually be checked. Such a case MUST NOT roll up as a silent pass.
+ */
+export type CaseVerificationStatus = 'verified' | 'notVerified';
+
 export interface TestCaseAggregation {
 	testCase: WorkflowTestCase;
 	runs: WorkflowTestCaseResult[];
@@ -415,6 +442,9 @@ export interface TestCaseAggregation {
 	executionScenarios: ExecutionScenarioAggregation[];
 	/** Build expectations aggregated as measured units (counted in the pass rate). */
 	buildExpectations: BuildExpectationAggregation[];
+	/** `notVerified` when no unit (scenario or expectation) was evaluated across
+	 *  all runs — nothing could be checked, so the case is not a pass. */
+	status: CaseVerificationStatus;
 }
 
 export interface MultiRunEvaluation {

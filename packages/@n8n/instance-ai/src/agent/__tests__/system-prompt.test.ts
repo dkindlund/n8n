@@ -1,5 +1,29 @@
 import { getDateTimeSection, getSystemPrompt } from '../system-prompt';
 
+const ORIGINAL_ENABLED_MODULES = process.env.N8N_ENABLED_MODULES;
+
+async function getSystemPromptWithEnabledModules(
+	enabledModules: string | undefined,
+): Promise<string> {
+	vi.resetModules();
+	if (enabledModules === undefined) {
+		delete process.env.N8N_ENABLED_MODULES;
+	} else {
+		process.env.N8N_ENABLED_MODULES = enabledModules;
+	}
+
+	const { getSystemPrompt: getSystemPromptFresh } = await import('../system-prompt.js');
+	return getSystemPromptFresh({});
+}
+
+afterEach(() => {
+	if (ORIGINAL_ENABLED_MODULES === undefined) {
+		delete process.env.N8N_ENABLED_MODULES;
+	} else {
+		process.env.N8N_ENABLED_MODULES = ORIGINAL_ENABLED_MODULES;
+	}
+});
+
 describe('getDateTimeSection', () => {
 	afterEach(() => vi.useRealTimers());
 
@@ -202,13 +226,42 @@ describe('getSystemPrompt', () => {
 			expect(prompt).not.toContain('build-workflow-with-agent');
 		});
 
-		it('forbids the agent_builder tool during workflow building', () => {
-			const prompt = getSystemPrompt({});
+		it('forbids the build-agent tool during workflow building when the agents module is enabled', async () => {
+			const prompt = await getSystemPromptWithEnabledModules('agents,instance-ai');
 
-			expect(prompt).toContain('do not call `agent_builder` at all');
+			expect(prompt).toContain('do not call `build-agent` at all');
+			expect(prompt).toContain('do not route around that by delegating to `build-agent`');
+		});
+
+		it('routes agent-preview transcript handoffs through get-session, deferring build-agent to explicit edits', async () => {
+			const prompt = await getSystemPromptWithEnabledModules('agents,instance-ai');
+
+			expect(prompt).toContain('<agent-preview-context>');
+			expect(prompt).toContain('call `get-session` to read the transcript first');
+			expect(prompt).toContain('do NOT call `build-agent` or otherwise modify the agent');
 			expect(prompt).toContain(
-				'do not route around that by creating a custom tool through `agent_builder`',
+				'Only call `build-agent` when the user explicitly asks to update, improve, or fix the agent',
 			);
+			expect(prompt).toContain('pass the given `agentId`');
+		});
+
+		it('routes agent listing, switching, and publish guidance when agents are enabled', async () => {
+			const prompt = await getSystemPromptWithEnabledModules('agents,instance-ai');
+
+			expect(prompt).toContain('Each distinct agent the user asks for is its own build target');
+			expect(prompt).toContain('calls without either continue the most recent target');
+			expect(prompt).toContain('call `agents(action="list")` directly');
+			expect(prompt).toContain('find its id via `agents(action="list")` and pass it as `agentId`');
+			expect(prompt).toContain('forward that intent to `build-agent`');
+			expect(prompt).toContain('never tell the user to open the agent editor and click Publish');
+			expect(prompt).toContain('`publish_agent` / `unpublish_agent`');
+		});
+
+		it('omits the build-agent fence and intent gate when the agents module is disabled', async () => {
+			const prompt = await getSystemPromptWithEnabledModules(undefined);
+
+			expect(prompt).not.toContain('build-agent');
+			expect(prompt).not.toContain('Intent gate');
 		});
 
 		it('routes standalone data-table work through the data-table-manager skill', () => {

@@ -1,5 +1,6 @@
 import type { User } from '@n8n/db';
 
+import type { DataTableResolutionFailure } from './entities/data-table/data-table.types';
 import type { WorkflowIdConflict } from './entities/workflow/workflow-import-match.service';
 import type {
 	WorkflowConflict,
@@ -42,6 +43,36 @@ export const FolderConflictPolicy = {
 	/** Fails the import if any package folder already exists in the target project. */
 	Fail: 'fail',
 } as const;
+
+export const MissingWorkflowDependencyPolicy = {
+	/** Fails the export when a static sub-workflow dependency is not included. */
+	Fail: 'fail',
+	/** Reserved for exporting missing static sub-workflows as requirements only. */
+	ReferenceOnly: 'reference-only',
+	/** Reserved for automatically adding missing static sub-workflows to the package. */
+	IncludeInPackage: 'include-in-package',
+} as const;
+
+export const DataTableMatchingMode = {
+	/** Matches a package table to the target-project table with the same id. Never falls back to name matching. */
+	ById: 'by-id',
+} as const;
+
+export const DataTableMissingMode = {
+	/** Creates absent tables from the package schema, keeping the package (source) id. */
+	Create: 'create',
+	/** Fails the import if a referenced table is absent in the target project. */
+	MustPreexist: 'must-preexist',
+	/** Imports the workflows without creating absent tables. Matched tables are still validated. */
+	DoNothing: 'do-nothing',
+} as const;
+
+export const DataTableSchemaConflictPolicy = {
+	/** Accepts a matched target able that has every package column, ignoring additional columns the target table has of its own. Never alters the target table. */
+	KeepExisting: 'keep-existing',
+	/** Strict drift detection: fails the import on any schema difference, including target-only columns. */
+	Fail: 'fail',
+} as const;
 /* eslint-enable @typescript-eslint/naming-convention */
 
 export type WorkflowConflictPolicy =
@@ -51,11 +82,25 @@ export type WorkflowIdPolicy = (typeof WorkflowIdPolicy)[keyof typeof WorkflowId
 
 export type FolderConflictPolicy = (typeof FolderConflictPolicy)[keyof typeof FolderConflictPolicy];
 
+export type MissingWorkflowDependencyPolicy =
+	(typeof MissingWorkflowDependencyPolicy)[keyof typeof MissingWorkflowDependencyPolicy];
+
+export type DataTableMatchingMode =
+	(typeof DataTableMatchingMode)[keyof typeof DataTableMatchingMode];
+
+export type DataTableMissingMode = (typeof DataTableMissingMode)[keyof typeof DataTableMissingMode];
+
+export type DataTableSchemaConflictPolicy =
+	(typeof DataTableSchemaConflictPolicy)[keyof typeof DataTableSchemaConflictPolicy];
+
 export interface ExportPackageRequest {
 	user: User;
 	workflowIds?: string[];
 	folderIds?: string[];
 	projectIds?: string[];
+	includeVariableValues?: boolean;
+	canExportVariableValues?: boolean;
+	missingWorkflowDependencyPolicy?: MissingWorkflowDependencyPolicy;
 }
 
 export type ImportPackageRequest = {
@@ -67,7 +112,8 @@ export type ImportPackageRequest = {
 	apiKeyScopes?: string[];
 } & ImportCredentialProperties &
 	ImportWorkflowProperties &
-	ImportFolderProperties;
+	ImportFolderProperties &
+	ImportDataTableProperties;
 
 export type ImportCredentialProperties = {
 	credentialMatchingMode: CredentialMatchingMode;
@@ -84,6 +130,12 @@ export type ImportFolderProperties = {
 	folderConflictPolicy: FolderConflictPolicy;
 };
 
+export type ImportDataTableProperties = {
+	dataTableMatchingMode: DataTableMatchingMode;
+	dataTableMissingMode: DataTableMissingMode;
+	dataTableSchemaConflictPolicy: DataTableSchemaConflictPolicy;
+};
+
 /**
  * The actor and resolved destination an import writes into. Threaded through
  * each entity importer so they share one resolved target instead of re-deriving
@@ -97,7 +149,9 @@ export interface ImportContext {
 	folderId: string | null;
 }
 
-export type ImportPackageEventOptions = ImportCredentialProperties & ImportWorkflowProperties;
+export type ImportPackageEventOptions = ImportCredentialProperties &
+	ImportWorkflowProperties &
+	ImportDataTableProperties;
 
 /** Credential ids involved in a package import, shaped for forward-compatible audit events. */
 export type ImportAuditCredentialIds = {
@@ -121,6 +175,11 @@ export type ImportPackageEventCounts = {
 		created: number;
 		requirements: number;
 	};
+	dataTables: {
+		matched: number;
+		created: number;
+		requirements: number;
+	};
 };
 
 /** Per-entity counts for an export, carried on `n8n-package-exported` for telemetry. */
@@ -128,6 +187,8 @@ export type ExportPackageEventCounts = {
 	workflows: number;
 	folders: number;
 	credentials: number;
+	dataTables: number;
+	variables: number;
 };
 
 export interface ImportedWorkflowSummary {
@@ -147,6 +208,13 @@ export interface ImportedFolderSummary {
 	name: string;
 	parentFolderId: string | null;
 	status: 'created' | 'skipped';
+}
+
+export interface ImportedProjectSummary {
+	sourceProjectId: string;
+	localId: string;
+	name: string;
+	status: 'created' | 'updated';
 }
 
 /**
@@ -169,7 +237,8 @@ export type BlockingIssue =
 			actualType?: string;
 			usedByWorkflows: string[];
 	  }
-	| ({ type: 'folder-conflict' } & FolderConflict);
+	| ({ type: 'folder-conflict' } & FolderConflict)
+	| ({ type: 'data-table-unresolved' } & DataTableResolutionFailure);
 
 export interface FolderConflict {
 	kind: 'parent-mismatch' | 'id-in-other-project' | 'fail-policy';
@@ -200,6 +269,14 @@ export function createBindings(seed: Partial<PackageImportBindings> = {}): Packa
 	};
 }
 
+/** Combines per-scope binding maps into one — used when a project package imports several scopes. */
+export function mergeBindings(...bindings: PackageImportBindings[]): PackageImportBindings {
+	return {
+		workflows: new Map(bindings.flatMap(({ workflows }) => [...workflows])),
+		credentials: new Map(bindings.flatMap(({ credentials }) => [...credentials])),
+	};
+}
+
 /** Plain-object form of {@link PackageImportBindings}, suitable for JSON responses. */
 export type SerializedBindings = Record<keyof PackageImportBindings, Record<string, string>>;
 
@@ -226,6 +303,7 @@ export interface ImportResult {
 	package: ImportPackageSummary;
 	workflows: ImportedWorkflowSummary[];
 	folders: ImportedFolderSummary[];
+	projects: ImportedProjectSummary[];
 	bindings: SerializedBindings;
 	credentials: ImportCredentialSummary;
 }
