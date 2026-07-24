@@ -162,6 +162,7 @@ export class JsTaskRunner extends TaskRunner {
 		this.requireResolver = createRequireResolver({
 			allowedBuiltInModules,
 			allowedExternalModules,
+			secureModules: this.mode === 'secure',
 		});
 
 		if (this.mode === 'secure') this.preventPrototypePollution(allowedExternalModules);
@@ -174,6 +175,7 @@ export class JsTaskRunner extends TaskRunner {
 	 *    API errors when using models like Gemini via LiteLLM proxy
 	 */
 	private patchChildProcessGlobally() {
+		/* eslint-disable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/prefer-nullish-coalescing, id-denylist -- deliberately monkey-patching the untyped CommonJS child_process module: reassigning its methods and forwarding via .call is inherently any-typed; `callback` params mirror node's own signatures */
 		const childProcess = require('child_process');
 
 		const isSpawningClaudeCode = (command: string, args?: readonly string[]): boolean => {
@@ -225,6 +227,9 @@ export class JsTaskRunner extends TaskRunner {
 		const originalExec = childProcess.exec;
 		const originalExecFile = childProcess.execFile;
 		const originalFork = childProcess.fork;
+		const originalSpawnSync = childProcess.spawnSync;
+		const originalExecSync = childProcess.execSync;
+		const originalExecFileSync = childProcess.execFileSync;
 
 		// Patch spawn to strip n8n tokens and handle model-specific caching
 		childProcess.spawn = (command: string, args?: any, options?: any) => {
@@ -261,6 +266,33 @@ export class JsTaskRunner extends TaskRunner {
 			};
 			return originalFork.call(childProcess, modulePath, args, secureOptions);
 		};
+
+		// Patch the synchronous variants too: without these, tokens leak via
+		// execSync/execFileSync/spawnSync while the async APIs are locked down.
+		childProcess.spawnSync = (command: string, args?: any, options?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(command, args, options?.env),
+			};
+			return originalSpawnSync.call(childProcess, command, args, secureOptions);
+		};
+
+		childProcess.execSync = (command: string, options?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(command, [], options?.env),
+			};
+			return originalExecSync.call(childProcess, command, secureOptions);
+		};
+
+		childProcess.execFileSync = (file: string, args?: any, options?: any) => {
+			const secureOptions = {
+				...options,
+				env: stripSensitiveEnvVars(file, args, options?.env),
+			};
+			return originalExecFileSync.call(childProcess, file, args, secureOptions);
+		};
+		/* eslint-enable @typescript-eslint/no-require-imports, @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-return, @typescript-eslint/prefer-nullish-coalescing, id-denylist */
 	}
 
 	private preventPrototypePollution(allowedExternalModules: Set<string> | '*') {
