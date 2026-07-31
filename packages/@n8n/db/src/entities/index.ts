@@ -13,7 +13,7 @@ import {
 	CredentialDependency,
 	type CredentialDependencyType,
 } from './credential-dependency-entity';
-import { CredentialsEntity } from './credentials-entity';
+import { CredentialsEntity, type CredentialUsageScope } from './credentials-entity';
 import { DeploymentKey } from './deployment-key';
 import { EvaluationCollection } from './evaluation-collection.ee';
 import { EvaluationConfig } from './evaluation-config.ee';
@@ -24,6 +24,7 @@ import type { ExecutionDataStorageLocation } from './execution-entity';
 import { ExecutionMetadata } from './execution-metadata';
 import { Folder } from './folder';
 import { FolderTagMapping } from './folder-tag-mapping';
+import { InstanceCredentialAssignment } from './instance-credential-assignment';
 import { InvalidAuthToken } from './invalid-auth-token';
 import { ProcessedData } from './processed-data';
 import { Project } from './project';
@@ -32,7 +33,12 @@ import { ProjectSecretsProviderAccess } from './project-secrets-provider-access'
 import type { SecretsProviderAccessRole } from './project-secrets-provider-access';
 import { Role } from './role';
 import { RoleMappingRule } from './role-mapping-rule';
-import { ScheduledJob, ScheduledJobKind, ScheduledJobKindList } from './scheduled-job';
+import {
+	ScheduledJob,
+	ScheduledJobKind,
+	ScheduledJobKindList,
+	ScheduledJobMisfirePolicy,
+} from './scheduled-job';
 import {
 	ScheduledTask,
 	ScheduledTaskStatus,
@@ -89,6 +95,7 @@ export {
 	AgentEvalRating,
 	type AgentEvalVote,
 	InvalidAuthToken,
+	InstanceCredentialAssignment,
 	AiBuilderTemporaryWorkflow,
 	ProcessedData,
 	Settings,
@@ -101,6 +108,7 @@ export {
 	WebhookEntity,
 	AuthIdentity,
 	CredentialsEntity,
+	type CredentialUsageScope,
 	CredentialDependency,
 	type CredentialDependencyType,
 	DeploymentKey,
@@ -114,6 +122,7 @@ export {
 	ScheduledJob,
 	ScheduledJobKind,
 	ScheduledJobKindList,
+	ScheduledJobMisfirePolicy,
 	ScheduledTask,
 	ScheduledTaskStatus,
 	ScheduledTaskStatusList,
@@ -166,6 +175,7 @@ export const entities = {
 	AgentEvalResult,
 	AgentEvalRating,
 	InvalidAuthToken,
+	InstanceCredentialAssignment,
 	AiBuilderTemporaryWorkflow,
 	ProcessedData,
 	Settings,

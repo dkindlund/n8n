@@ -35,6 +35,7 @@ export { FolderRepository } from './folder.repository';
 export { FolderTagMappingRepository } from './folder-tag-mapping.repository';
 export { ScopeRepository } from './scope.repository';
 export { InvalidAuthTokenRepository } from './invalid-auth-token.repository';
+export { InstanceCredentialAssignmentRepository } from './instance-credential-assignment.repository';
 export { LicenseMetricsRepository } from './license-metrics.repository';
 export { ProjectRelationRepository } from './project-relation.repository';
 export { ProjectRepository, type ProjectListOptions } from './project.repository';
@@ -78,11 +79,12 @@ export { WorkflowPublishHistoryRepository } from './workflow-publish-history.rep
 export {
 	WorkflowReviewRequestRepository,
 	type InboxCursor,
-	type WorkflowReviewRequestForWorkflow,
+	type WorkflowReviewRequestForWorkflowRow,
 } from './workflow-review-request.repository';
 export {
 	WorkflowReviewRequestWorkflowRepository,
 	type WorkflowReviewRequestLinkedWorkflow,
+	type WorkflowReviewRequestWorkflowDetailRow,
 } from './workflow-review-request-workflow.repository';
 export { WorkflowReviewRequestReviewerRepository } from './workflow-review-request-reviewer.repository';
 export { WorkflowReviewRequestAuthorRepository } from './workflow-review-request-author.repository';
