@@ -22,7 +22,7 @@ import Modal from '@/app/components/Modal.vue';
 import SaveButton from '@/app/components/SaveButton.vue';
 import { useMessage } from '@/app/composables/useMessage';
 import { useNodeHelpers } from '@/app/composables/useNodeHelpers';
-import { useToast } from '@/app/composables/useToast';
+import { useToast } from '@n8n/composables/useToast';
 import { CREDENTIAL_EDIT_MODAL_KEY } from '../../credentials.constants';
 import { EnterpriseEditionFeature, MODAL_CONFIRM } from '@/app/constants';
 import { useCredentialsStore } from '../../credentials.store';
@@ -33,10 +33,11 @@ import {
 	waitForOAuthCallback,
 } from '../../composables/oauthCallback';
 import { useNDVStore } from '@/features/ndv/shared/ndv.store';
-import { useSettingsStore } from '@/app/stores/settings.store';
+import { useSettingsStore } from '@n8n/stores/settings.store';
 import { useUIStore } from '@/app/stores/ui.store';
 import { provideWorkflowDocumentStore } from '@/app/stores/workflowDocument.store';
 import type { ProjectSharingData } from '@/features/collaboration/projects/projects.types';
+import { TEMPLATED_CUSTOM_AUTH_CREDENTIAL_TYPE } from '@/features/credentials/templatedAuth.utils';
 import { assert } from '@n8n/utils/assert';
 import { createEventBus } from '@n8n/utils/event-bus';
 
@@ -187,7 +188,7 @@ const ndvStore = computed(() => useNDVStore(workflowDocumentStore.value.document
 
 const contextNode = computed<INode | null>(() => {
 	if (ndvStore.value.activeNode) return ndvStore.value.activeNode;
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	if (isCredentialModalState(modalState) && modalState.contextNode) {
 		return modalState.contextNode;
 	}
@@ -196,7 +197,7 @@ const contextNode = computed<INode | null>(() => {
 });
 
 const overrideProjectId = computed(() => {
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	return isCredentialModalState(modalState) ? modalState.projectId : undefined;
 });
 
@@ -207,8 +208,12 @@ const form = useCredentialForm({
 	projectId: () => overrideProjectId.value,
 	showAuthSelector: () => requiredCredentials.value,
 	suggestedName: () => {
-		const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+		const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 		return isCredentialModalState(modalState) ? modalState.suggestedName : undefined;
+	},
+	setupHint: () => {
+		const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
+		return isCredentialModalState(modalState) ? modalState.credentialSetupHint : undefined;
 	},
 	// Scroll the auth-error/success banner into view after a test (parity with the
 	// modal's former testCredential, which ended with scrollToTop).
@@ -254,30 +259,30 @@ const {
 } = form;
 
 const hideAskAssistant = computed<boolean>(() => {
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	return isCredentialModalState(modalState) && modalState.hideAskAssistant === true;
 });
 
 // The host's Instance AI credential-help behavior, stashed in the modal state by
 // whoever opened the modal (the editor capability or the credentials list).
 const instanceAiCredentialHelp = computed(() => {
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	return isCredentialModalState(modalState) ? modalState.instanceAiCredentialHelp : undefined;
 });
 
 const closeOnSave = computed<boolean>(() => {
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	return isCredentialModalState(modalState) && modalState.closeOnSave === true;
 });
 
 const presetUsageScope = computed<NewCredentialsModal['usageScope']>(() => {
 	if (props.mode !== 'new') return undefined;
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	return isCredentialModalState(modalState) ? modalState.usageScope : undefined;
 });
 
 const appendToBody = computed<boolean>(() => {
-	const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+	const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 	return isCredentialModalState(modalState) && modalState.appendToBody === true;
 });
 
@@ -301,11 +306,19 @@ const sidebarItems = computed(() => {
 						position: 'top',
 					} satisfies IMenuItem,
 				]),
-		{
-			id: 'details',
-			label: i18n.baseText('credentialEdit.credentialEdit.details'),
-			position: 'top',
-		},
+		// Deliberately hidden for Templated Custom Auth to keep the modal to the
+		// guided essentials; the type's machinery lives in the Connection pane's
+		// "Edit setup" state. Trade-off: the id and created/updated timestamps
+		// (CredentialInfo) have no other surface for this type.
+		...(credentialTypeName.value === TEMPLATED_CUSTOM_AUTH_CREDENTIAL_TYPE
+			? []
+			: [
+					{
+						id: 'details',
+						label: i18n.baseText('credentialEdit.credentialEdit.details'),
+						position: 'top',
+					} satisfies IMenuItem,
+				]),
 	];
 
 	return menuItems;
@@ -340,7 +353,7 @@ const showSharingContent = computed(() => activeTab.value === 'sharing' && !!cre
 onMounted(async () => {
 	// Inner try isolates optional secrets loading; outer try catches all other initialization failures.
 	try {
-		const modalState = uiStore.modalsById[CREDENTIAL_EDIT_MODAL_KEY];
+		const modalState = uiStore.modalStateById[CREDENTIAL_EDIT_MODAL_KEY];
 		requiredCredentials.value =
 			isCredentialModalState(modalState) && modalState.showAuthSelector === true;
 
@@ -1235,9 +1248,20 @@ async function onAuthTypeChanged(payload: CredentialModeOption): Promise<void> {
 
 		restoreOrReset();
 
+		// A freshly selected auth mode has no confirmed connection yet — without this,
+		// stale `oauthTokenData`/`connectedByMe` restored from a mode cached earlier in
+		// this session (or carried over from the loaded credential) makes the banner
+		// misreport "connected" for a mode that was never actually saved.
+		connectedByMe.value = false;
+		credentialData.value = {
+			...credentialData.value,
+			oauthTokenData: null as unknown as CredentialInformation,
+		};
+
 		pendingAuthType.value = payload.type;
+		hasUnsavedChanges.value = true;
 		// Also update credential name but only if the default name is still used
-		if (hasUnsavedChanges.value && !hasUserSpecifiedName.value) {
+		if (!hasUserSpecifiedName.value) {
 			const newDefaultName = await credentialsStore.getNewCredentialName({
 				credentialTypeName: defaultCredentialTypeName.value,
 			});
