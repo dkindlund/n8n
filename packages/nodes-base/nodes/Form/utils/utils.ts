@@ -75,10 +75,6 @@ function isFormUserAuthClaims(value: unknown): value is FormUserAuthClaims {
 	);
 }
 
-export function isFormOAuth2Enabled(): boolean {
-	return process.env.N8N_ENV_FEAT_FORM_TRIGGER_OAUTH2 === 'true';
-}
-
 export function sanitizeHtml(text: string) {
 	return sanitize(text, {
 		allowedTags: [
@@ -780,11 +776,11 @@ function clearFormOAuthToken(res: Response, req: Request, resourceUrl: string): 
  */
 async function authenticateFormUserOrRespond(
 	context: IWebhookFunctions,
-	oauth2Enabled: boolean = false,
+	runOAuth2Flow: boolean = false,
 ): Promise<{ user: IUser; token: string | null } | null> {
 	const req = context.getRequestObject();
 
-	if (oauth2Enabled) {
+	if (runOAuth2Flow) {
 		const res = context.getResponseObject();
 		const url = context.getWebhookResourceUrl('default');
 		if (!url) {
@@ -972,14 +968,76 @@ function renderFormShell({
 	const inner = new URL(buildAbsoluteFormUrl(req));
 	inner.searchParams.set('n8nShellInner', '1');
 
+	res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+	res.render('form-shell', {
+		formTitle,
+		iframeSrc: `${inner.pathname}${inner.search}`,
+		resourceUrl,
+		...buildFormShellViewModel(credentials, submitterEmail),
+	});
+}
+
+export type FormShellCredentialRow = {
+	id: string;
+	name: string;
+	type: string;
+	status: CredentialCheckStatus['status'];
+	connected: boolean;
+	/** Letter tile, used whenever the provider icon doesn't resolve. */
+	initial: string;
+	iconUrl?: string;
+	authorizationUrl?: string;
+	revokeUrl?: string;
+	resolverId?: string;
+	account?: string;
+	usedBy?: string;
+};
+
+export type FormShellViewModel = {
+	credentials: FormShellCredentialRow[];
+	total: number;
+	connectedCount: number;
+	useDialog: boolean;
+	allConnected: boolean;
+	summaryText: string;
+	footerText: string;
+	submitterEmail?: string;
+};
+
+/** Submitter-facing copy talks about accounts, never credentials — and never `account(s)`. */
+const accountsLabel = (count: number) => (count === 1 ? 'account' : 'accounts');
+
+/**
+ * The one-line state of the connect panel for two or more accounts. Mirrored by
+ * the shell's client-side `summaryText()`, which re-renders it in place as rows
+ * connect (a reload would bounce the submitter back through consent).
+ */
+export function formShellSummaryText(total: number, connectedCount: number): string {
+	const remaining = total - connectedCount;
+	if (remaining <= 0) return `All ${total} accounts connected · ready to submit`;
+	if (connectedCount === 0) return `${total} accounts needed to submit this form`;
+	return `${remaining} more ${accountsLabel(remaining)} needed to submit this form`;
+}
+
+/**
+ * View model for `form-shell.handlebars`. Two shapes: a single required account
+ * gets its own row with a Connect button that opens the OAuth popup directly;
+ * two or more collapse behind a summary line plus the "Connect your accounts"
+ * dialog.
+ */
+export function buildFormShellViewModel(
+	credentials: CredentialCheckStatus[],
+	submitterEmail?: string,
+): FormShellViewModel {
 	const initialOf = (name: string) => (name.trim().charAt(0) || '?').toUpperCase();
-	const rows = credentials.map((c) => ({
+	const rows: FormShellCredentialRow[] = credentials.map((c) => ({
 		id: c.credentialId,
 		name: c.credentialName,
 		type: c.credentialType,
 		status: c.status,
 		connected: c.status === 'configured',
 		initial: initialOf(c.credentialName),
+		iconUrl: c.iconUrl,
 		authorizationUrl: c.authorizationUrl,
 		revokeUrl: c.revokeUrl,
 		resolverId: c.resolverId,
@@ -988,27 +1046,23 @@ function renderFormShell({
 		// provider account (when it differs) is a backend-enrichment follow-up.
 		account: c.status === 'configured' ? submitterEmail : undefined,
 		// `usedBy` (owning node) comes from the backend-enrichment follow-up.
-		usedBy: undefined as string | undefined,
+		usedBy: undefined,
 	}));
 
 	const total = rows.length;
 	const connectedCount = rows.filter((r) => r.connected).length;
-	// Design: 1–2 credentials render inline; 3+ collapse into a strip + dialog.
-	const useDialog = total >= 3;
 
-	res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
-	res.render('form-shell', {
-		formTitle,
-		iframeSrc: `${inner.pathname}${inner.search}`,
-		resourceUrl,
+	return {
 		credentials: rows,
 		total,
 		connectedCount,
-		useDialog,
+		// Design: one account connects directly from its row; two or more collapse.
+		useDialog: total >= 2,
+		allConnected: total > 0 && connectedCount === total,
+		summaryText: formShellSummaryText(total, connectedCount),
+		footerText: `${connectedCount} of ${total} ${accountsLabel(total)} connected`,
 		submitterEmail,
-		iconStack: rows.slice(0, 3).map((r) => r.initial),
-		moreCount: total > 3 ? total - 3 : 0,
-	});
+	};
 }
 
 export async function formWebhook(
@@ -1054,8 +1108,7 @@ export async function formWebhook(
 	let oAuth2Token: string | undefined;
 	if (node.typeVersion > 1) {
 		if (authentication === 'n8nUserAuth') {
-			const { user, token } =
-				(await authenticateFormUserOrRespond(context, isFormOAuth2Enabled())) ?? {};
+			const { user, token } = (await authenticateFormUserOrRespond(context, true)) ?? {};
 			if (!user) return { noWebhookResponse: true };
 			authedUser = user;
 			oAuth2Token = token ?? undefined;
@@ -1147,20 +1200,19 @@ export async function formWebhook(
 		// already rendering the inner iframe — wrap the form in the hosting shell
 		// (form + connect panel, submit disabled). No-op unless OAuth2 form auth and
 		// the dynamic-credentials module are both active.
-		if (
-			authentication === 'n8nUserAuth' &&
-			authedUser &&
-			isFormOAuth2Enabled() &&
-			oAuth2Token &&
-			!shellInner
-		) {
+		if (authentication === 'n8nUserAuth' && authedUser && oAuth2Token && !shellInner) {
 			// Must name the endpoint actually being served (test vs production) — the
 			// OAuth2 token is bound to that resource, same as in the auth path above.
 			const resourceUrl = trimTrailingSlash(context.getWebhookResourceUrl('default') ?? '');
 			if (resourceUrl) {
 				await context.establishTriggerIdentity(oAuth2Token, resourceUrl);
 				const credentialStatus = await context.checkTriggerCredentialStatus();
-				if (credentialStatus && !credentialStatus.readyToExecute) {
+				// Gate on "needs end-user accounts", NOT on readiness: a fully connected
+				// submitter must keep the panel — which accounts the form uses, which
+				// identity, and Disconnect — otherwise it would vanish on the reload right
+				// after connecting. Forms with no end-user accounts fall through to the
+				// plain render below, unchanged.
+				if (credentialStatus?.credentials.length) {
 					// Hand the OAuth2 token to the same-site iframe GET via the one-hop
 					// cookie the OAuth2 flow already uses, so the inner form authenticates
 					// without re-running the provider redirect inside the frame.
@@ -1183,14 +1235,9 @@ export async function formWebhook(
 		let authToken: string | undefined;
 		if (node.typeVersion > 1) {
 			if (authentication === 'n8nUserAuth' && authedUser) {
-				if (!isFormOAuth2Enabled()) {
-					// Cookies aren't sent on POST from the sandboxed form page
-					// (null origin + SameSite=Lax). Embed an HMAC token so the
-					// POST handler can re-authenticate the user.
-					authToken = generateFormUserAuthToken(node, authedUser);
-				} else {
-					authToken = oAuth2Token;
-				}
+				// Cookies aren't sent on POST from the sandboxed form page (null origin +
+				// SameSite=Lax), so the POST re-authenticates off this token.
+				authToken = oAuth2Token;
 			} else {
 				authToken = await generateFormPostBasicAuthToken(context, authProperty);
 			}
