@@ -417,6 +417,7 @@ async function fetchAgent(
 	if (isStaleAgentTarget(targetProjectId, targetAgentId)) return;
 	agent.value = data;
 	agentName.value = data.name;
+	upsertProjectAgentsListCache(targetProjectId, data);
 }
 
 async function fetchAgentFiles(
@@ -1502,7 +1503,7 @@ async function initialize({ preserveState = false }: { preserveState?: boolean }
 		// credentials the current user can use in this project context.
 		credentialsStore.setCredentials([]);
 		await Promise.all([
-			credentialsStore.fetchAllCredentialsForWorkflow({ projectId: targetProjectId }),
+			credentialsStore.fetchUsableCredentials({ projectId: targetProjectId }),
 			credentialsStore.fetchCredentialTypes(false),
 		]).catch(() => undefined);
 		if (!isCurrentInitialization()) return;
