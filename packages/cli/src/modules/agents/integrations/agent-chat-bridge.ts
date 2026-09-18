@@ -5,6 +5,7 @@ import {
 	MAX_AGENT_CHAT_ATTACHMENT_SIZE_MB,
 	MAX_AGENT_CHAT_ATTACHMENTS_PER_MESSAGE,
 	type AgentIntegrationConfig,
+	type AgentMessageAuthor,
 } from '@n8n/api-types';
 import { LockNamespace, LockService } from '@n8n/backend-common';
 import { type HttpRequestClient, OutboundHttp } from '@n8n/backend-network';
@@ -19,12 +20,12 @@ import {
 	AgentChatAttachmentService,
 	type StoredAttachmentRef,
 } from '../agent-chat-attachment.service';
-import type { AgentExecutionOrchestratorService } from '../agent-execution-orchestrator.service';
+import type {
+	AgentExecutionOrchestratorService,
+	ExecuteForChatPublishedConfig,
+} from '../agent-execution-orchestrator.service';
 import { AgentExecutionService } from '../agent-execution.service';
-import {
-	hashAgentSandboxPrincipal,
-	type AgentSandboxPrincipalHash,
-} from '../agent-sandbox-principal';
+import { hashAgentSandboxPrincipal } from '../agent-sandbox-principal';
 import { integrationMemoryResourceId } from '../utils/agent-memory-scope';
 import { resolveInboundMimeType } from '../utils/inbound-attachments';
 import type {
@@ -44,7 +45,7 @@ import { CallbackStore, type CallbackMetadata } from './callback-store';
 import type { ComponentMapper, ShortenCallback } from './component-mapper';
 import { loadChatSdk } from './esm-loader';
 import { IntegrationMessageContextService } from './integration-message-context.service';
-import type { ReplyExpectation } from './integration-tools';
+import type { ReplyExpectation, IntegrationMessageContext } from './integration-tools';
 import { N8NCheckpointStorage } from './n8n-checkpoint-storage';
 import { downloadDiscordAttachment } from './platforms/discord-operations';
 
@@ -59,6 +60,11 @@ const SESSION_GENERATION_KEY_PREFIX = 'agents:chat-session-generation';
 const SESSION_GENERATION_TTL_MS = 90 * Time.days.toMilliseconds;
 /** Matches the rotation suffix appended to a rotated thread id, e.g. "#3". */
 const SESSION_GENERATION_SUFFIX_RE = /#\d+$/;
+
+function toMessageAuthor(author: Author): AgentMessageAuthor {
+	const name = (author.userName || author.fullName || author.userId).replace(/[\[\]\r\n]/g, '');
+	return { id: author.userId, name: name || author.userId };
+}
 
 interface SessionGenerationState {
 	/** Current rotation counter for a base thread id; 0 means the original, unsuffixed thread. */
@@ -84,25 +90,12 @@ function stillWaitingNotice(suspendPayload: unknown): string {
 	return `⏳ ${title} — use the buttons on that card and I'll continue from there.`;
 }
 
-interface AgentExecutor {
-	executeForChatPublished(config: {
-		agentId: string;
-		projectId: string;
-		message: string;
-		attachments?: StoredAttachmentRef[];
-		memory: { threadId: InternalThread; resourceId: string };
-		integrationType?: string;
-		sandboxPrincipalHash: AgentSandboxPrincipalHash;
-	}): AsyncGenerator<StreamChunk>;
-
-	resumeForChat(config: {
-		agentId: string;
-		projectId: string;
-		runId: string;
-		toolCallId: string;
-		resumeData: unknown;
-		integrationType?: string;
-	}): AsyncGenerator<StreamChunk>;
+interface AgentExecutor extends Pick<AgentExecutionOrchestratorService, 'resumeForChat'> {
+	executeForChatPublished(
+		config: Omit<ExecuteForChatPublishedConfig, 'memory'> & {
+			memory: { threadId: InternalThread; resourceId: string };
+		},
+	): AsyncGenerator<StreamChunk>;
 
 	/**
 	 * The thread's still-open suspension, if the run is parked on one right now.
@@ -245,14 +238,20 @@ export class AgentChatBridge {
 				memory,
 				agentId: aid,
 				message,
+				modelMessage,
+				author,
 				attachments,
 				integrationType,
 				sandboxPrincipalHash,
+				messageContext,
+				contextConversation,
 			}) {
 				yield* agentService.executeForChatPublished({
 					agentId: aid,
 					projectId: n8nProjectId,
 					message,
+					modelMessage,
+					author,
 					attachments,
 					memory: {
 						threadId: memory.threadId.id,
@@ -263,6 +262,8 @@ export class AgentChatBridge {
 					},
 					integrationType,
 					sandboxPrincipalHash,
+					messageContext,
+					contextConversation,
 				});
 			},
 			async *resumeForChat(config) {
@@ -386,16 +387,21 @@ export class AgentChatBridge {
 	// ---------------------------------------------------------------------------
 
 	/**
-	 * Resume from a server-side trigger rather than a user action. Rebuilds the
-	 * platform thread from the stored agent thread id, so the continuation streams
-	 * back into the conversation the suspension was posted to.
+	 * Resume a server-side trigger in the checkpoint's reply destination.
+	 * Older checkpoints can fall back to the stored agent thread ID.
 	 */
 	async resumeInAgentThread(
 		agentThreadId: string,
 		runId: string,
 		toolCallId: string,
 		resumeData: unknown,
+		context?: { messageContext: IntegrationMessageContext | null; allowLegacyThreadId: boolean },
 	): Promise<void> {
+		const target = context?.messageContext?.replyTarget ?? context?.messageContext?.target;
+		if (context && !target?.threadId && !context.allowLegacyThreadId) {
+			this.logger.warn('Agent resume has no reply destination', { agentId: this.agentId, runId });
+			return;
+		}
 		const prefix = `${this.agentId}:`;
 		const withoutAgentPrefix = agentThreadId.startsWith(prefix)
 			? agentThreadId.slice(prefix.length)
@@ -407,14 +413,16 @@ export class AgentChatBridge {
 		// expects the real platform id only.
 		const platformThreadId = withoutAgentPrefix.replace(SESSION_GENERATION_SUFFIX_RE, '');
 		const sdkThreadId =
-			this.integrationImpl?.formatThreadId?.toSdk(platformThreadId) ?? platformThreadId;
+			target?.threadId ??
+			this.integrationImpl?.formatThreadId?.toSdk(platformThreadId) ??
+			platformThreadId;
 
 		await this.hitlResumeHandler.executeResume(
 			this.chat.thread(sdkThreadId),
 			runId,
 			toolCallId,
 			resumeData,
-			false,
+			{ notifyOnDuplicate: false, ...(context ? { messageContext: context.messageContext } : {}) },
 		);
 	}
 
@@ -658,42 +666,32 @@ export class AgentChatBridge {
 				this.messageContextBridge.resolveSubject(message),
 			]);
 			statusHandle = onceStatusHandle(bridgeExecutionContext.statusHandle);
-			const latestContextOptions = {
+			const messageContext = this.messageContextBridge.capture(thread, {
 				messageId: message.id,
 				interactingUserId: message.author.userId,
 				...bridgeExecutionContext.platformAgentContext,
 				subject,
 				replyExpectation,
-			};
-			await this.messageContextBridge.updateLatest(
-				threadId.id,
-				message.author.userId,
-				thread,
-				latestContextOptions,
-			);
-			// Tools look up context on persistence.threadId (the execution
-			// session). When a bound reply continues a task, that is the origin
-			// thread, not the Slack thread — store this turn there too.
-			if (memoryThreadId.id !== threadId.id) {
-				await this.messageContextBridge.updateLatest(
-					memoryThreadId.id,
-					memoryResourceId,
-					thread,
-					latestContextOptions,
-				);
-			}
-			// threadId.id is agent-prefixed for observation storage; resourceId keeps
-			// the platform user identity so episodic recall works across threads for
-			// the same user while staying isolated between users.
+			});
+			// threadId.id is agent-prefixed for shared conversation history;
+			// resourceId keeps the author identity so episodic recall follows them.
 			// Always run the published snapshot — integrations are production traffic.
+			// The model gets the author label and thread history; the transcript
+			// records the plain text and carries the author as structured data.
+			const author = toMessageAuthor(message.author);
 			const textWithNotes = [text, ...attachmentNotes].filter(Boolean).join('\n');
-			const agentInput = bridgeExecutionContext.historyContext
-				? `${bridgeExecutionContext.historyContext}\n\n${textWithNotes}`
-				: textWithNotes;
+			const labelledText = `[${author.name} (${author.id})]: ${textWithNotes}`;
+			const modelMessage = bridgeExecutionContext.historyContext
+				? `${bridgeExecutionContext.historyContext}\n\n${labelledText}`
+				: labelledText;
 			const stream = this.agentService.executeForChatPublished({
+				messageContext,
+				contextConversation: { threadId: threadId.id, resourceId: message.author.userId },
 				agentId: this.agentId,
 				projectId: this.n8nProjectId,
-				message: agentInput,
+				message: textWithNotes,
+				modelMessage,
+				author,
 				attachments: attachments.length > 0 ? attachments : undefined,
 				memory: {
 					threadId: memoryThreadId,
@@ -701,10 +699,10 @@ export class AgentChatBridge {
 				},
 				integrationType: this.integration.type,
 				sandboxPrincipalHash: hashAgentSandboxPrincipal({
-					type: 'integration-user',
+					type: 'integration-thread',
 					connectionId: this.integration.credentialId,
 					platform: this.integration.type,
-					platformUserId: message.author.userId,
+					platformThreadId: this.resolvePlatformThreadId(thread),
 				}),
 			});
 
