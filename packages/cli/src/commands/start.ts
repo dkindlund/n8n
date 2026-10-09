@@ -43,7 +43,6 @@ import { JwtService } from '@/services/jwt.service';
 import { ExecutionsPruningService } from '@/services/pruning/executions-pruning.service';
 import { WorkflowHistoryCompactionService } from '@/services/pruning/workflow-history-compaction.service';
 
-import { WorkflowStatisticsRollupService } from '@/services/workflow-statistics-rollup.service';
 import { WaitTracker } from '@/wait-tracker';
 
 import { BaseCommand } from './base-command';
@@ -291,8 +290,6 @@ export class Start extends BaseCommand<z.infer<typeof flagsSchema>> {
 		this.logger.debug('Data deduplication service init complete');
 		await this.initExternalHooks();
 		this.logger.debug('External hooks init complete');
-		this.initWorkflowHistory();
-		this.logger.debug('Workflow history init complete');
 
 		if (!isMultiMainEnabled) {
 			await this.cleanupTestRunner();
@@ -424,7 +421,6 @@ export class Start extends BaseCommand<z.infer<typeof flagsSchema>> {
 
 		Container.get(ExecutionsPruningService).init();
 		Container.get(WorkflowHistoryCompactionService).init();
-		Container.get(WorkflowStatisticsRollupService).init();
 
 		// The runner provisions the durable system task jobs, so it must finish
 		// before the scheduler can claim one.

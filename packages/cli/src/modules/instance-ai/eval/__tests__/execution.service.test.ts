@@ -481,6 +481,38 @@ describe('EvalExecutionService', () => {
 
 				expect(workflowRunner.run).toHaveBeenCalledTimes(1);
 			});
+
+			it('pins one empty item for a Manual Trigger without trigger content', async () => {
+				nodeTypes.getByNameAndVersion.mockReturnValue({
+					description: { properties: [] } as unknown as INodeTypeDescription,
+					trigger: vi.fn(),
+				} as never);
+				const manualTrigger = {
+					id: 'node-1',
+					name: 'Run',
+					type: 'n8n-nodes-base.manualTrigger',
+					typeVersion: 1,
+					position: [0, 0],
+					parameters: {},
+				} as INode;
+				mockGetStartNode.mockReturnValue(manualTrigger);
+				workflowFinderService.findWorkflowForUser.mockResolvedValue(
+					makeWorkflowEntity({ nodes: [manualTrigger] }) as never,
+				);
+				const hints = makeEmptyHints();
+				hints.triggerContent = {};
+				generateMockHintsMock.mockResolvedValue(hints);
+
+				await service.executeWithLlmMock('wf-1', makeUser());
+
+				expect(generateMockHintsMock).toHaveBeenCalledWith(
+					expect.objectContaining({ defaultStartNodeName: 'Run' }),
+				);
+				const runArg = workflowRunner.run.mock.calls[0][0] as unknown as {
+					pinData?: Record<string, unknown[]>;
+				};
+				expect(runArg.pinData?.Run).toEqual([{ json: {} }]);
+			});
 		});
 
 		describe('engine readiness', () => {
@@ -669,6 +701,16 @@ describe('EvalExecutionService', () => {
 
 			expect(result.success).toBe(false);
 			expect(workflowStaticDataService.saveStaticDataById).toHaveBeenCalledWith('wf-1', {});
+		});
+
+		it('aborts the mock handler when the run ends, so a request loop left running stops', async () => {
+			workflowFinderService.findWorkflowForUser.mockResolvedValue(makeWorkflowEntity() as never);
+			activeExecutions.getPostExecutePromise.mockRejectedValue(new Error('execution crashed'));
+
+			await service.executeWithLlmMock('wf-1', makeUser());
+
+			const options = createLlmMockHandlerMock.mock.calls[0][0] as { signal?: AbortSignal };
+			expect(options.signal?.aborted).toBe(true);
 		});
 
 		it('clears the workflow deduplication state before and after each run', async () => {
