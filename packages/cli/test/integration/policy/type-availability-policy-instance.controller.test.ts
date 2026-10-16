@@ -7,6 +7,7 @@ import type { NodeLoader } from 'n8n-workflow';
 import { mock } from 'vitest-mock-extended';
 
 import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
+import { TypeAvailabilityPolicyAttachmentRepository } from '@/modules/type-availability-policies/database/repositories/type-availability-policy-attachment.repository';
 import { TypeAvailabilityPolicyScopeRepository } from '@/modules/type-availability-policies/database/repositories/type-availability-policy-scope.repository';
 import { TypeAvailabilityPolicyRepository } from '@/modules/type-availability-policies/database/repositories/type-availability-policy.repository';
 import { createMember, createOwner } from '@test-integration/db/users';
@@ -31,8 +32,7 @@ beforeAll(async () => {
 	owner = await createOwner();
 	member = await createMember();
 
-	// A `package` rule is rejected at write time unless the package is actually loaded — see
-	// `n8n-nodes-base` used as a stand-in for "an installed package" below.
+	// `n8n-nodes-base` stands in for an installed package, so its rules save without a warning.
 	Container.get(LoadNodesAndCredentials).loaders = {
 		'n8n-nodes-base': mock<NodeLoader>({ known: { nodes: {}, credentials: {} } }),
 	};
@@ -103,7 +103,7 @@ describe('node type availability policy instance controller RBAC', () => {
 		const response = await testServer
 			.authAgentFor(member)
 			.put('/node-type-policies/scopes/does-not-exist/attachments')
-			.send({ attachments: [] });
+			.send({ attachments: [], version: 0 });
 
 		expect(response.statusCode).toBe(403);
 	});
@@ -235,6 +235,29 @@ describe('node type availability policy instance controller admin happy path', (
 		expect(persisted.body.data.rules).toEqual([rule('r2', 'c.d')]);
 	});
 
+	test('a package rule for an uninstalled package saves with a warning, and does not block later writes', async () => {
+		const agent = testServer.authAgentFor(owner);
+		const missingPackage = {
+			id: 'r-mcp',
+			action: 'deny' as const,
+			selector: { kind: 'package' as const, value: 'n8n-nodes-mcp' },
+		};
+
+		const first = await agent
+			.put('/node-type-policies/instance')
+			.send({ rules: [missingPackage], defaultAction: 'allow', version: 0 });
+		expect(first.statusCode).toBe(200);
+		expect(first.body.data.warnings).toEqual([{ kind: 'notLoaded', ruleId: 'r-mcp' }]);
+
+		const unrelatedChange = await agent.put('/node-type-policies/instance').send({
+			rules: [missingPackage],
+			defaultAction: 'deny',
+			version: first.body.data.version,
+		});
+		expect(unrelatedChange.statusCode).toBe(200);
+		expect(unrelatedChange.body.data.warnings).toEqual([{ kind: 'notLoaded', ruleId: 'r-mcp' }]);
+	});
+
 	test('a PUT /instance that changes the rules and the default action together moves the version by one', async () => {
 		const agent = testServer.authAgentFor(owner);
 
@@ -362,7 +385,10 @@ describe('node type availability policy instance controller admin happy path', (
 
 		const response = await agent
 			.put(`/node-type-policies/scopes/${instance.body.data.scopeId}/attachments`)
-			.send({ attachments: [{ policyId: other.id, priority: 0, isFloor: false }] });
+			.send({
+				attachments: [{ policyId: other.id, priority: 0, isFloor: false }],
+				version: instance.body.data.version,
+			});
 
 		expect(response.statusCode).toBe(400);
 	});
@@ -384,7 +410,7 @@ describe('node type availability policy instance controller admin happy path', (
 		const response = await testServer
 			.authAgentFor(owner)
 			.put(`/node-type-policies/scopes/${otherScope.id}/attachments`)
-			.send({ attachments: [] });
+			.send({ attachments: [], version: otherScope.version });
 
 		expect(response.statusCode).toBe(404);
 	});
@@ -492,13 +518,57 @@ describe('node type availability policy instance controller admin happy path', (
 		await testServer
 			.authAgentFor(owner)
 			.put(`/node-type-policies/scopes/${scopeId}/attachments`)
-			.send({ attachments: [{ policyId, priority: 5, isFloor: false }] });
+			.send({
+				attachments: [{ policyId, priority: 5, isFloor: false }],
+				version: instancePut.body.data.version,
+			});
 
 		const response = await testServer
 			.authAgentFor(owner)
 			.delete(`/node-type-policies/policies/${policyId}`);
 
 		expect(response.statusCode).toBe(409);
+	});
+
+	test('PUT /scopes/:scopeId/attachments with a stale version returns 409 and writes nothing', async () => {
+		const agent = testServer.authAgentFor(owner);
+		const instance = await agent
+			.put('/node-type-policies/instance')
+			.send({ rules: [], defaultAction: 'allow', version: 0 });
+		expect(instance.statusCode).toBe(200);
+
+		const read = await agent.get('/node-type-policies/instance');
+		expect(read.statusCode).toBe(200);
+		const { scopeId, version } = read.body.data;
+		const rule = {
+			id: 'r1',
+			action: 'deny',
+			selector: { kind: 'name', value: 'n8n-nodes-base.slack' },
+		};
+		const policy = await agent.post('/node-type-policies/policies').send({ rules: [rule] });
+		expect(policy.statusCode).toBe(200);
+		const attachment = { policyId: policy.body.data.policy.id, priority: 0, isFloor: false };
+
+		const first = await agent
+			.put(`/node-type-policies/scopes/${scopeId}/attachments`)
+			.send({ attachments: [attachment], version });
+		expect(first.statusCode).toBe(200);
+		expect(first.body.data.version).toBe(version + 1);
+		expect(first.body.data.attachments).toEqual([{ ...attachment, rules: [rule] }]);
+
+		const stale = await agent
+			.put(`/node-type-policies/scopes/${scopeId}/attachments`)
+			.send({ attachments: [], version });
+
+		expect(stale.statusCode).toBe(409);
+		const persisted = await agent.get('/node-type-policies/instance');
+		expect(persisted.statusCode).toBe(200);
+		expect(persisted.body.data.version).toBe(first.body.data.version);
+		expect(persisted.body.data.rules).toEqual([rule]);
+		const attachments = await Container.get(
+			TypeAvailabilityPolicyAttachmentRepository,
+		).listAttachmentsForScope(scopeId, {});
+		expect(attachments).toEqual([{ ...attachment, rules: [rule] }]);
 	});
 
 	test('PUT /scopes/:scopeId/attachments persists and fires an audit event', async () => {
@@ -521,7 +591,10 @@ describe('node type availability policy instance controller admin happy path', (
 		const response = await testServer
 			.authAgentFor(owner)
 			.put(`/node-type-policies/scopes/${scopeId}/attachments`)
-			.send({ attachments: [{ policyId, priority: 1, isFloor: false }] });
+			.send({
+				attachments: [{ policyId, priority: 1, isFloor: false }],
+				version: instancePut.body.data.version,
+			});
 
 		expect(response.statusCode).toBe(200);
 		expect(emitSpy).toHaveBeenCalledWith(
