@@ -1,5 +1,5 @@
 import type { LicenseState } from '@n8n/backend-common';
-import { EventService } from '@n8n/backend-services';
+import { EventService, type PostHogClient } from '@n8n/backend-services';
 import { mockInstance } from '@n8n/backend-test-utils';
 import { EMPTY_CANVAS_GROUPS_FLAG } from '@n8n/api-types';
 import type { GlobalConfig } from '@n8n/config';
@@ -8,6 +8,8 @@ import {
 	type CredentialsRepository,
 	type DbConnection,
 	type IWorkflowDb,
+	type Person,
+	type Project,
 	type ProjectRelationRepository,
 	type SharedWorkflowRepository,
 	type User,
@@ -23,6 +25,7 @@ import { TELEMETRY_EVENT } from '@n8n/telemetry';
 import { type BinaryDataConfig, InstanceSettings } from 'n8n-core';
 import {
 	createErrorExecutionData,
+	ERROR_MESSAGE_REDACTED_MESSAGE,
 	type INode,
 	type INodesGraphResult,
 	type IRun,
@@ -41,7 +44,6 @@ import type { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
 import { OtelConfig } from '@/modules/otel/otel.config';
 import type { PolicyRule } from '@/modules/type-availability-policies/policy-rule.types';
 import type { NodeTypes } from '@/node-types';
-import type { PostHogClient } from '@/posthog';
 import type { OwnershipService } from '@/services/ownership.service';
 import type { Telemetry } from '@/telemetry';
 import { getCpuLimit, getMemoryLimit } from '@/utils/container-limits';
@@ -294,7 +296,7 @@ describe('TelemetryEventRelay', () => {
 				surfaces: ['public-api'],
 				identitySubject: 'binding',
 				linkByEmail: 'verified-only',
-				provisionHuman: 'off',
+				provisionPerson: 'off',
 				roleMappingMode: 'off',
 			};
 
@@ -348,7 +350,13 @@ describe('TelemetryEventRelay', () => {
 	});
 
 	describe('memory guard events', () => {
-		it('should track on `memory-guard-execution-stopped` event and send it at once', () => {
+		it('should track on `memory-guard-execution-stopped` event with the workflow owner and send it at once', async () => {
+			ownershipService.getWorkflowProjectCached.mockResolvedValueOnce(
+				mock<Project>({ id: 'project123', type: 'personal' }),
+			);
+			ownershipService.getPersonalProjectOwnerCached.mockResolvedValueOnce(
+				mock<User>({ id: 'user123' }),
+			);
 			const event: RelayEventMap['memory-guard-execution-stopped'] = {
 				executionId: 'execution123',
 				workflowId: 'workflow123',
@@ -364,10 +372,12 @@ describe('TelemetryEventRelay', () => {
 			};
 
 			eventService.emit('memory-guard-execution-stopped', event);
+			await flushPromises();
 
 			expect(telemetry.track).toHaveBeenCalledWith(
 				TELEMETRY_EVENT.PLATFORM.MEMORY_GUARD_STOPPED_EXECUTION,
 				{
+					user_id: 'user123',
 					workflow_id: 'workflow123',
 					execution_mode: 'webhook',
 					reason: 'critical',
@@ -379,6 +389,57 @@ describe('TelemetryEventRelay', () => {
 					freed_memory: true,
 					workflow_deactivation_started: false,
 				},
+			);
+			expect(telemetry.flushQueue).toHaveBeenCalled();
+		});
+
+		it('should track on `memory-guard-execution-stopped` event with the instance owner for a team project', async () => {
+			ownershipService.getWorkflowProjectCached.mockResolvedValueOnce(
+				mock<Project>({ id: 'project123', type: 'team' }),
+			);
+
+			eventService.emit('memory-guard-execution-stopped', {
+				executionId: 'execution123',
+				workflowId: 'workflow123',
+				mode: 'webhook',
+				reason: 'threshold',
+				runningNodeType: undefined,
+				largestDataNodeType: undefined,
+				estimatedBytes: 300,
+				memoryUsedBytes: 960,
+				memoryLimitBytes: 1000,
+				freedMemory: false,
+				workflowDeactivationStarted: false,
+			});
+			await flushPromises();
+
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.PLATFORM.MEMORY_GUARD_STOPPED_EXECUTION,
+				expect.objectContaining({ user_id: 'owner123', workflow_id: 'workflow123' }),
+			);
+		});
+
+		it('should track on `memory-guard-execution-stopped` event without a user when the owner lookup fails', async () => {
+			ownershipService.getWorkflowProjectCached.mockRejectedValueOnce(new Error('db down'));
+
+			eventService.emit('memory-guard-execution-stopped', {
+				executionId: 'execution123',
+				workflowId: 'workflow123',
+				mode: 'webhook',
+				reason: 'critical',
+				runningNodeType: undefined,
+				largestDataNodeType: undefined,
+				estimatedBytes: 300,
+				memoryUsedBytes: 960,
+				memoryLimitBytes: 1000,
+				freedMemory: true,
+				workflowDeactivationStarted: false,
+			});
+			await flushPromises();
+
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.PLATFORM.MEMORY_GUARD_STOPPED_EXECUTION,
+				expect.objectContaining({ user_id: undefined, workflow_id: 'workflow123' }),
 			);
 			expect(telemetry.flushQueue).toHaveBeenCalled();
 		});
@@ -531,12 +592,12 @@ describe('TelemetryEventRelay', () => {
 			});
 		});
 
-		it('should track on `source-control-user-started-pull-ui` event with publicApi: true', () => {
+		it('should track on `source-control-user-started-pull-ui` event from a public API route', () => {
 			const event: RelayEventMap['source-control-user-started-pull-ui'] = {
 				workflowUpdates: 5,
 				workflowConflicts: 2,
 				credConflicts: 1,
-				publicApi: true,
+				publicApi: 'other',
 			};
 
 			eventService.emit('source-control-user-started-pull-ui', event);
@@ -546,6 +607,7 @@ describe('TelemetryEventRelay', () => {
 				workflow_conflicts: 2,
 				cred_conflicts: 1,
 				public_api: true,
+				public_api_client: 'other',
 			});
 		});
 
@@ -601,7 +663,7 @@ describe('TelemetryEventRelay', () => {
 			});
 		});
 
-		it('should track on `source-control-user-started-push-ui` event with publicApi: true', () => {
+		it('should track on `source-control-user-started-push-ui` event from a public API route', () => {
 			const event: RelayEventMap['source-control-user-started-push-ui'] = {
 				userId: 'userId',
 				workflowsEligible: 10,
@@ -609,7 +671,7 @@ describe('TelemetryEventRelay', () => {
 				credsEligible: 5,
 				credsEligibleWithConflicts: 1,
 				variablesEligible: 3,
-				publicApi: true,
+				publicApi: 'other',
 			};
 
 			eventService.emit('source-control-user-started-push-ui', event);
@@ -622,6 +684,7 @@ describe('TelemetryEventRelay', () => {
 				creds_eligible_with_conflicts: 1,
 				variables_eligible: 3,
 				public_api: true,
+				public_api_client: 'other',
 			});
 		});
 
@@ -647,14 +710,14 @@ describe('TelemetryEventRelay', () => {
 			});
 		});
 
-		it('should track on `source-control-user-finished-push-ui` event with publicApi: true', () => {
+		it('should track on `source-control-user-finished-push-ui` event from a public API route', () => {
 			const event: RelayEventMap['source-control-user-finished-push-ui'] = {
 				userId: 'userId',
 				workflowsEligible: 10,
 				workflowsPushed: 8,
 				credsPushed: 5,
 				variablesPushed: 3,
-				publicApi: true,
+				publicApi: 'other',
 			};
 
 			eventService.emit('source-control-user-finished-push-ui', event);
@@ -666,6 +729,7 @@ describe('TelemetryEventRelay', () => {
 				creds_pushed: 5,
 				variables_pushed: 3,
 				public_api: true,
+				public_api_client: 'other',
 			});
 		});
 	});
@@ -1962,7 +2026,7 @@ describe('TelemetryEventRelay', () => {
 					lastName: 'Doe',
 					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
-				publicApi: true,
+				publicApi: 'other',
 			};
 
 			eventService.emit('public-api-key-created', event);
@@ -1970,6 +2034,7 @@ describe('TelemetryEventRelay', () => {
 			expect(telemetry.track).toHaveBeenCalledWith('API key created', {
 				user_id: 'user123',
 				public_api: true,
+				public_api_client: 'other',
 			});
 		});
 
@@ -1982,7 +2047,7 @@ describe('TelemetryEventRelay', () => {
 					lastName: 'Doe',
 					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
-				publicApi: true,
+				publicApi: 'other',
 				isOwn: true,
 			};
 
@@ -1991,6 +2056,7 @@ describe('TelemetryEventRelay', () => {
 			expect(telemetry.track).toHaveBeenCalledWith('API key deleted', {
 				user_id: 'user123',
 				public_api: true,
+				public_api_client: 'other',
 				is_own: true,
 			});
 		});
@@ -2153,13 +2219,21 @@ describe('TelemetryEventRelay', () => {
 		});
 
 		it.each([
-			{ descriptionLength: 0, publicApi: false },
-			{ descriptionLength: 18, publicApi: false },
-			{ descriptionLength: 0, publicApi: true },
-			{ descriptionLength: 18, publicApi: true },
-		])(
+			{ descriptionLength: 0, publicApi: false, expected: { public_api: false } },
+			{ descriptionLength: 18, publicApi: false, expected: { public_api: false } },
+			{
+				descriptionLength: 0,
+				publicApi: 'editor_ui',
+				expected: { public_api: true, public_api_client: 'editor_ui' },
+			},
+			{
+				descriptionLength: 18,
+				publicApi: 'other',
+				expected: { public_api: true, public_api_client: 'other' },
+			},
+		] as const)(
 			'tracks creation with description length $descriptionLength and public API $publicApi',
-			({ descriptionLength, publicApi }) => {
+			({ descriptionLength, publicApi, expected }) => {
 				const event: RelayEventMap['credentials-created'] = {
 					credentialName: 'My GitHub account',
 					credentialDescriptionLength: descriptionLength,
@@ -2186,7 +2260,7 @@ describe('TelemetryEventRelay', () => {
 					TELEMETRY_EVENT.CREDENTIALS.USER_CREATED_CREDENTIALS,
 					{
 						source: 'backend',
-						public_api: publicApi,
+						...expected,
 						user_id: 'user123',
 						user_role: GLOBAL_OWNER_ROLE.slug,
 						credential_type: 'github',
@@ -2351,6 +2425,37 @@ describe('TelemetryEventRelay', () => {
 			);
 			expect(
 				TELEMETRY_EVENT.CREDENTIALS.USER_PROBED_CREDENTIAL.getValidationError(payload),
+			).toBeNull();
+		});
+
+		it('should track on `oauth-client-registered` event', () => {
+			eventService.emit('oauth-client-registered', {
+				userId: 'user123',
+				credentialId: 'cred123',
+				credentialType: 'mcpOAuth2Api',
+				method: 'cimd',
+				success: true,
+				cimdEnabled: true,
+				serverSupportsCimd: true,
+				serverSupportsDcr: false,
+			});
+
+			const payload = {
+				user_id: 'user123',
+				credential_id: 'cred123',
+				credential_type: 'mcpOAuth2Api',
+				method: 'cimd',
+				success: true,
+				cimd_enabled: true,
+				server_supports_cimd: true,
+				server_supports_dcr: false,
+			};
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.CREDENTIALS.USER_REGISTERED_OAUTH_CLIENT,
+				payload,
+			);
+			expect(
+				TELEMETRY_EVENT.CREDENTIALS.USER_REGISTERED_OAUTH_CLIENT.getValidationError(payload),
 			).toBeNull();
 		});
 
@@ -2756,7 +2861,7 @@ describe('TelemetryEventRelay', () => {
 					firstName: 'John',
 					lastName: 'Doe',
 					role: { slug: GLOBAL_OWNER_ROLE.slug },
-				} as User,
+				} as Person,
 				workflowId: 'workflow123',
 				workflow: mock<IWorkflowDb>({
 					id: 'workflow123',
@@ -2764,7 +2869,7 @@ describe('TelemetryEventRelay', () => {
 					nodes: [],
 					connections: {},
 				}),
-				publicApi: true,
+				publicApi: 'other',
 				source: 'api',
 			};
 
@@ -2778,6 +2883,7 @@ describe('TelemetryEventRelay', () => {
 					user_id: 'user123',
 					workflow_id: 'workflow123',
 					public_api: true,
+					public_api_client: 'other',
 					source: 'api',
 					private_credentials_count: 0,
 					private_credential_types: [],
@@ -2797,7 +2903,7 @@ describe('TelemetryEventRelay', () => {
 					firstName: 'John',
 					lastName: 'Doe',
 					role: { slug: GLOBAL_OWNER_ROLE.slug },
-				} as User,
+				} as Person,
 				workflowId: 'workflow123',
 				workflow: mock<IWorkflowDb>({
 					id: 'workflow123',
@@ -2937,7 +3043,7 @@ describe('TelemetryEventRelay', () => {
 					nodes: [],
 					connections: {},
 				}),
-				publicApi: true,
+				publicApi: 'other',
 				deactivatedVersionId: 'version-abc-123',
 				source: 'n8n-mcp',
 			};
@@ -2948,6 +3054,7 @@ describe('TelemetryEventRelay', () => {
 				user_id: 'user123',
 				workflow_id: 'workflow123',
 				public_api: true,
+				public_api_client: 'other',
 				deactivated_version_id: 'version-abc-123',
 				source: 'n8n-mcp',
 			});
@@ -3774,7 +3881,7 @@ describe('TelemetryEventRelay', () => {
 					tags: 2,
 				},
 				credentialExportPolicy: 'expression-values-only',
-				includeArchivedWorkflows: true,
+				includeArchived: true,
 			};
 
 			eventService.emit('n8n-package-exported', event);
@@ -4025,6 +4132,24 @@ describe('TelemetryEventRelay', () => {
 				});
 			},
 		);
+
+		it('should track on `user-logged-out` event', () => {
+			const event: RelayEventMap['user-logged-out'] = {
+				user: {
+					id: 'user123',
+					email: 'user@example.com',
+					firstName: 'John',
+					lastName: 'Doe',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
+				},
+			};
+
+			eventService.emit('user-logged-out', event);
+
+			expect(telemetry.track).toHaveBeenCalledWith(TELEMETRY_EVENT.AUTH.USER_LOGGED_OUT, {
+				user_id: 'user123',
+			});
+		});
 
 		it('should track on `user-submitted-personalization-survey` event', () => {
 			const event: RelayEventMap['user-submitted-personalization-survey'] = {
@@ -4794,6 +4919,31 @@ describe('TelemetryEventRelay', () => {
 			expect(telemetry.trackWorkflowExecution).toHaveBeenCalledWith(expectedProperties);
 		});
 
+		it('should add the personal credentials count to workflow execution telemetry', async () => {
+			const runData = {
+				finished: true,
+				status: 'success',
+				mode: 'trigger',
+				data: { resultData: { runData: {} } },
+			} as unknown as IRun;
+
+			const event: RelayEventMap['workflow-post-execute'] = {
+				workflow: mockWorkflowBase,
+				executionId: 'execution123',
+				userId: 'user123',
+				runData,
+				telemetryMetadata: { personalCredentialsCount: 2 },
+			};
+
+			eventService.emit('workflow-post-execute', event);
+
+			await flushPromises();
+
+			expect(telemetry.trackWorkflowExecution).toHaveBeenCalledWith(
+				expect.objectContaining({ execution_source: 'user', personal_credentials_count: 2 }),
+			);
+		});
+
 		it('should call telemetry.track when manual node execution finished', async () => {
 			sharedWorkflowRepository.findSharingRole.mockResolvedValue('workflow:editor');
 			credentialsRepository.findOneBy.mockResolvedValue(
@@ -4888,6 +5038,67 @@ describe('TelemetryEventRelay', () => {
 					node_graph_string: JSON.stringify(nodeGraph.nodeGraph),
 					error_node_id: '1',
 				}),
+			);
+		});
+
+		it('should redact the error message when the workflow policy covers the run', async () => {
+			sharedWorkflowRepository.findSharingRole.mockResolvedValue('workflow:editor');
+			credentialsRepository.findOneBy.mockResolvedValue(
+				mock<CredentialsEntity>({ type: 'openAiApi', isManaged: false }),
+			);
+
+			const errorNode: INode = {
+				id: '1',
+				typeVersion: 1,
+				name: 'Jira',
+				type: 'n8n-nodes-base.jira',
+				parameters: {},
+				position: [100, 200],
+			};
+			const error = new NodeApiError(
+				errorNode,
+				{ message: 'secret value', httpCode: '401', stack: '' },
+				{ message: 'secret value', level: 'warning', functionality: 'regular' },
+			);
+			const runData = {
+				status: 'error',
+				mode: 'manual',
+				data: createErrorExecutionData(errorNode, error),
+			} as IRun;
+
+			vi.spyOn(TelemetryHelpers, 'generateNodesGraph').mockImplementation(
+				() =>
+					({
+						nodeGraph: { node_types: [], node_connections: [], webhookNodeNames: [] },
+						nameIndices: { Jira: '1' },
+					}) as unknown as INodesGraphResult,
+			);
+			vi.spyOn(TelemetryHelpers, 'getNodeTypeForName').mockImplementation(
+				() => ({ type: 'n8n-nodes-base.jira', version: 1, name: 'Jira' }) as unknown as INode,
+			);
+
+			eventService.emit('workflow-post-execute', {
+				workflow: { ...mockWorkflowBase, settings: { redactionPolicy: 'all' } },
+				executionId: 'execution123',
+				userId: 'user123',
+				runData,
+			});
+
+			await flushPromises();
+
+			expect(telemetry.track).toHaveBeenCalledWith(
+				'Manual node exec finished',
+				expect.objectContaining({ error_message: ERROR_MESSAGE_REDACTED_MESSAGE }),
+			);
+			expect(telemetry.trackWorkflowExecution).toHaveBeenCalledWith(
+				expect.objectContaining({
+					error_message: ERROR_MESSAGE_REDACTED_MESSAGE,
+					error_node_type: 'n8n-nodes-base.jira',
+				}),
+			);
+			expect(JSON.stringify(vi.mocked(telemetry.track).mock.calls)).not.toContain('secret value');
+			expect(JSON.stringify(vi.mocked(telemetry.trackWorkflowExecution).mock.calls)).not.toContain(
+				'secret value',
 			);
 		});
 
@@ -5498,7 +5709,11 @@ describe('TelemetryEventRelay', () => {
 			eventService.emit('promotion-environment-created', {
 				user,
 				environmentId: 'env-1',
+				environmentName: 'Production',
+				providerId: 'prov-1',
+				providerName: 'Deploy key',
 				providerType: 'git',
+				repository: 'git@github.com:o/r.git',
 				direction: 'promote',
 				environmentScope: 'instance',
 				createBranchOnPromotion: true,
@@ -5526,6 +5741,7 @@ describe('TelemetryEventRelay', () => {
 				user,
 				providerId: 'prov-1',
 				providerType: 'gitlab',
+				authType: 'token',
 				changedFields: ['name', 'auth'],
 				outcome: 'success',
 				durationMs: 120,
@@ -5553,7 +5769,9 @@ describe('TelemetryEventRelay', () => {
 			eventService.emit('promotion-provider-deleted', {
 				user,
 				providerId: 'prov-1',
+				providerName: 'Deploy key',
 				providerType: 'git',
+				authType: 'ssh-key',
 			});
 
 			const payload = { user_id: 'user123', provider_id: 'prov-1', provider_type: 'git' };
@@ -5570,7 +5788,12 @@ describe('TelemetryEventRelay', () => {
 			eventService.emit('promotion-environment-updated', {
 				user,
 				environmentId: 'env-1',
+				environmentName: 'Production',
+				providerId: 'prov-1',
+				providerName: 'Deploy key',
+				repository: 'git@github.com:o/r.git',
 				direction: 'apply',
+				environmentScope: 'instance',
 				changedFields: ['provider', 'settings'],
 			});
 
@@ -5593,6 +5816,10 @@ describe('TelemetryEventRelay', () => {
 			eventService.emit('promotion-environment-deleted', {
 				user,
 				environmentId: 'env-1',
+				environmentName: 'Production',
+				providerId: 'prov-1',
+				providerName: 'Deploy key',
+				repository: 'git@github.com:o/r.git',
 				direction: 'promote',
 				environmentScope: 'projects',
 			});
@@ -5818,6 +6045,71 @@ describe('TelemetryEventRelay', () => {
 			);
 			expect(
 				TELEMETRY_EVENT.PROMOTIONS.USER_APPROVED_PROMOTION_REVIEW.getValidationError(payload),
+			).toBeNull();
+		});
+
+		it('should track a closed review, with what the host reported', () => {
+			eventService.emit('promotion-review-closed', {
+				user,
+				reviewId: 'review-1',
+				environmentId: 'env-1',
+				reviewType: 'gitlab',
+				reviewAgeMs: 3600000,
+				hostStatus: 'not_found',
+				outcome: 'closed',
+				durationMs: 40,
+			});
+
+			const payload = {
+				user_id: 'user123',
+				promotion_review_id: 'review-1',
+				environment_id: 'env-1',
+				review_type: 'gitlab',
+				review_age_ms: 3600000,
+				host_status: 'not_found',
+				outcome: 'closed',
+				failure_kind: undefined,
+				duration_ms: 40,
+			};
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.PROMOTIONS.USER_CLOSED_PROMOTION_REVIEW,
+				payload,
+			);
+			expect(
+				TELEMETRY_EVENT.PROMOTIONS.USER_CLOSED_PROMOTION_REVIEW.getValidationError(payload),
+			).toBeNull();
+		});
+
+		it('should track a failed close that never reached the host', () => {
+			eventService.emit('promotion-review-closed', {
+				user,
+				reviewId: 'review-1',
+				environmentId: 'env-1',
+				reviewType: 'gitlab',
+				reviewAgeMs: 1000,
+				hostStatus: null,
+				outcome: 'failed',
+				failureKind: 'user',
+				durationMs: 5,
+			});
+
+			const payload = {
+				user_id: 'user123',
+				promotion_review_id: 'review-1',
+				environment_id: 'env-1',
+				review_type: 'gitlab',
+				review_age_ms: 1000,
+				host_status: null,
+				outcome: 'failed',
+				failure_kind: 'user',
+				duration_ms: 5,
+			};
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.PROMOTIONS.USER_CLOSED_PROMOTION_REVIEW,
+				payload,
+			);
+			expect(
+				TELEMETRY_EVENT.PROMOTIONS.USER_CLOSED_PROMOTION_REVIEW.getValidationError(payload),
 			).toBeNull();
 		});
 	});
@@ -6138,7 +6430,7 @@ describe('TelemetryEventRelay', () => {
 			surfaces: ['public-api', 'instance-mcp'],
 			identitySubject: 'binding',
 			linkByEmail: 'verified-only',
-			provisionHuman: 'jit',
+			provisionPerson: 'jit',
 			roleMappingMode: 'on-provision',
 		};
 		const trackedFacets = {
@@ -6148,6 +6440,7 @@ describe('TelemetryEventRelay', () => {
 			identity_subject: 'binding',
 			link_by_email: 'verified-only',
 			provision_human: 'jit',
+			provision_person: 'jit',
 			role_mapping_mode: 'on-provision',
 		};
 
