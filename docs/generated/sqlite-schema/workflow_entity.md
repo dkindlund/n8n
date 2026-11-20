@@ -352,6 +352,7 @@ erDiagram
 }
 "workflow_publication_retry_state" {
   datetime_3_ createdAt
+  INTEGER retryDelaySeconds
   varchar_36_ targetVersionId
   datetime_3_ updatedAt
   varchar_36_ workflowId PK
@@ -416,6 +417,7 @@ erDiagram
   varchar_128_ name
   varchar_36_ parentFolderId FK
   varchar_36_ projectId FK
+  varchar_16_ resourceType
   datetime_3_ updatedAt
 }
 ```

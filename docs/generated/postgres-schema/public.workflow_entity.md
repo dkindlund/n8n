@@ -361,6 +361,7 @@ erDiagram
 }
 "public.workflow_publication_retry_state" {
   timestamp_3__with_time_zone createdAt
+  integer retryDelaySeconds
   varchar_36_ targetVersionId
   timestamp_3__with_time_zone updatedAt
   varchar_36_ workflowId FK
@@ -425,6 +426,7 @@ erDiagram
   varchar_128_ name
   varchar_36_ parentFolderId FK
   varchar_36_ projectId FK
+  varchar_16_ resourceType
   timestamp_3__with_time_zone updatedAt
 }
 ```
