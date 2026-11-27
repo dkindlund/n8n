@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, ref } from 'vue';
+import { computed, defineAsyncComponent, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAsyncState } from '@vueuse/core';
 import { I18nT } from 'vue-i18n';
@@ -34,7 +34,13 @@ import ApiKeyRateLimitsSection from './rateLimits/ApiKeyRateLimitsSection.vue';
 import { PUBLIC_API_RATE_LIMIT_SETTINGS_FLAG } from './rateLimits/rateLimits';
 import { usePostHog } from '@/app/stores/posthog.store';
 import { usePolicyAdminAccess } from '@n8n/frontend-module-type-availability-policies';
-import { useTypePoliciesSettingsFlag } from './composables/useTypePoliciesSettingsFlag';
+import {
+	loadPromotionSettingsRows,
+	PROMOTION_REVIEW_SETTINGS_ON_POLICIES_PAGE,
+} from '@n8n/frontend-module-promotions';
+import { usePromotionsEnabled } from '@/features/shared/promotions/usePromotionsEnabled';
+
+const PromotionSettingsRows = defineAsyncComponent(loadPromotionSettingsRows);
 
 const router = useRouter();
 const rootStore = useRootStore();
@@ -43,10 +49,10 @@ const usersStore = useUsersStore();
 const i18n = useI18n();
 const { showToast, showError } = useToast();
 const pageRedirectionHelper = usePageRedirectionHelper();
+const { isEnabled: isPromotionsEnabled } = usePromotionsEnabled();
 const posthogStore = usePostHog();
 const { canManagePolicies: canManageTypePolicies, entryRouteName: typePoliciesRouteName } =
 	usePolicyAdminAccess();
-const { isEnabled: isTypePoliciesSettingsEnabled } = useTypePoliciesSettingsFlag();
 
 function openTypePolicies() {
 	void router.push({ name: typePoliciesRouteName.value });
@@ -93,6 +99,8 @@ function goToUpgrade() {
 
 const { state, isReady, error } = useAsyncState(async () => {
 	const settings = await securitySettingsApi.getSecuritySettings(rootStore.restApiContext);
+	// The route guard of the projects page reads the policy from the settings store.
+	if (settings.workflowReviews) settingsStore.setWorkflowReviewsPolicy(settings.workflowReviews);
 	return {
 		personalSpacePublishing: settings.personalSpacePublishing,
 		personalSpaceSharing: settings.personalSpaceSharing,
@@ -404,7 +412,7 @@ const sharingCountText = computed(() => {
 		</N8nSettingsSection>
 
 		<N8nSettingsSection
-			v-if="canManageTypePolicies && isTypePoliciesSettingsEnabled"
+			v-if="canManageTypePolicies"
 			:title="i18n.baseText('settings.security.nodeAndCredentialPolicies.section')"
 			data-test-id="security-type-policies-section"
 		>
@@ -434,7 +442,6 @@ const sharingCountText = computed(() => {
 		<N8nSettingsSection
 			v-if="state?.workflowReviews"
 			:title="i18n.baseText('settings.security.workflowReviews.title')"
-			:description="i18n.baseText('settings.security.workflowReviews.description')"
 			data-test-id="security-workflow-reviews-section"
 		>
 			<WorkflowReviewsSection
@@ -442,6 +449,15 @@ const sharingCountText = computed(() => {
 				:initial-always-required="state.workflowReviews.alwaysRequired === true"
 				:managed-by-env="isManagedByEnv"
 			/>
+		</N8nSettingsSection>
+
+		<N8nSettingsSection
+			v-if="isPromotionsEnabled"
+			:title="i18n.baseText('settings.promotions.reviews.title')"
+			:description="i18n.baseText('settings.promotions.reviews.description')"
+			data-test-id="security-promotion-reviews-section"
+		>
+			<PromotionSettingsRows :settings="PROMOTION_REVIEW_SETTINGS_ON_POLICIES_PAGE" />
 		</N8nSettingsSection>
 
 		<ApiKeyRateLimitsSection v-if="isRateLimitSettingsEnabled" />

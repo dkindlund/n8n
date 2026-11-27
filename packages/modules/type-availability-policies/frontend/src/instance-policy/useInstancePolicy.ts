@@ -3,9 +3,7 @@ import { useToast } from '@n8n/composables/useToast';
 import { useI18n } from '@n8n/i18n';
 
 import { useInstancePolicyStore, type InstancePolicySaveResult } from './instance-policy.store';
-import { setTypeAccess } from './setTypeAccess';
 import { usePolicyAdminAccess } from '../composables/usePolicyAdminAccess';
-import type { InstancePolicy, InstancePolicyContent } from '../type-availability-policies.api';
 import type { RestrictedTypeKind } from '../type-availability-policies.constants';
 
 export function useInstancePolicy() {
@@ -31,6 +29,11 @@ export function useInstancePolicy() {
 		if (error !== undefined) showAccessError(error);
 	}
 
+	/** Reads the usage counts of each manageable kind that has none yet, for an access dialog. */
+	async function loadMissingUsage(): Promise<void> {
+		await store.loadMissingUsage(manageableKinds.value);
+	}
+
 	function showAccessError(error: unknown) {
 		toast.showError(
 			error,
@@ -38,11 +41,19 @@ export function useInstancePolicy() {
 		);
 	}
 
-	async function save<K extends RestrictedTypeKind>(
-		kind: K,
-		update: (policy: InstancePolicy<K>) => InstancePolicyContent<K>,
+	/**
+	 * Gives every type in `typeNames` the same access in one write, so either all of them change or
+	 * none does. Tells the admin when the write did not save.
+	 */
+	async function setAccessMany(
+		kind: RestrictedTypeKind,
+		typeNames: readonly string[],
+		action: PolicyAction,
 	): Promise<InstancePolicySaveResult> {
-		const result = await store.save(kind, update);
+		const result = await store.setAccess(
+			kind,
+			typeNames.map((type) => ({ type, access: action })),
+		);
 
 		if (result.status === 'changed') {
 			toast.showMessage({
@@ -81,13 +92,7 @@ export function useInstancePolicy() {
 		typeName: string,
 		action: PolicyAction,
 	): Promise<InstancePolicySaveResult> {
-		return await save(kind, (policy) => {
-			// The access snapshot names the deciding rule only for the policy version that it read.
-			const access = store.typeAccess[kind];
-			const decidingRuleId =
-				access?.version === policy.version ? access.types.get(typeName)?.matchedRuleId : undefined;
-			return setTypeAccess(policy, typeName, action, decidingRuleId);
-		});
+		return await setAccessMany(kind, [typeName], action);
 	}
 
 	return {
@@ -98,7 +103,10 @@ export function useInstancePolicy() {
 		accessLoading: store.accessLoading,
 		load,
 		loadAccess,
-		save,
+		loadUsage: store.loadUsage,
+		loadMissingUsage,
+		usageOf: store.usageOf,
 		setAccess,
+		setAccessMany,
 	};
 }

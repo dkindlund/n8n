@@ -1,4 +1,4 @@
-import type { JSONObject, SideCallUsageReport, TokenUsage } from '@n8n/agents';
+import type { AgentMessage, JSONObject, SideCallUsageReport, TokenUsage } from '@n8n/agents';
 import {
 	ASSISTANT_WORKFLOWS_ARCHIVED_EVENT,
 	InstanceAiConfirmRequestDto,
@@ -56,6 +56,8 @@ import { InstanceAiCreditService } from '../instance-ai-credit.service';
 import { InstanceAiErrorReporterService } from '../instance-ai-error-reporter.service';
 import { InstanceAiAdapterService } from '../instance-ai.adapter.service';
 import { InstanceAiSettingsService } from '../instance-ai-settings.service';
+import { extractEditorContextResourceAttachments } from '../internal-messages';
+import { extractTextFromContent } from '../message-parser';
 import {
 	getUserFacingErrorCode,
 	getUserFacingErrorMessage,
@@ -84,6 +86,7 @@ import {
 	writeSuspendedContextTurn,
 } from './assistant-context-turn-telemetry';
 import { AssistantEventSink } from './assistant-event-sink';
+import { AssistantRunDebugService } from './assistant-run-debug.service';
 import {
 	createSnapshotTemporaryWorkflowMarkers,
 	createThreadTemporaryWorkflowMarkers,
@@ -178,6 +181,7 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 		private readonly userRepository: UserRepository,
 		private readonly turnOverrides: AssistantTurnOverrides,
 		private readonly telemetry: TelemetryProxy,
+		private readonly runDebug: AssistantRunDebugService,
 	) {
 		this.logger = logger.scoped('instance-ai');
 		this.aiConfig = globalConfig.ai;
@@ -204,6 +208,16 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 	normalizeResumeData(resumeData: unknown): unknown {
 		const parsed = InstanceAiConfirmRequestDto.safeParse(resumeData);
 		return parsed.success ? buildResumeData(toConfirmationData(parsed.data)) : resumeData;
+	}
+
+	/**
+	 * The model input of a user turn keeps its resource attachments, such as
+	 * mentions, in the thread context block. Read them back like the current
+	 * runtime does, so the chat shows them again after a reload.
+	 */
+	readMessageReferences(modelInput: AgentMessage): InstanceAiResourceAttachment[] {
+		const content = 'content' in modelInput ? modelInput.content : undefined;
+		return extractEditorContextResourceAttachments(extractTextFromContent(content));
 	}
 
 	/**
@@ -323,14 +337,6 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 				proxyRunConfig,
 				experimentGates,
 				...(trace ? { tracing: trace.context } : {}),
-				// Whether the turn can build or edit an agent. Auto approval is not part of the Agent
-				// Builder, so such a turn keeps every approval card. The subject is bound after this,
-				// so the first turn of an agent thread counts it here. An attached or mentioned agent
-				// does not bind the thread, but this turn can still edit it, so the turn stays manual.
-				// Later turns that do not attach it use the approval mode of the user.
-				attachesAgent:
-					request.subject?.type === 'agent' ||
-					request.attachments?.some((attachment) => attachment.type === 'agent'),
 			},
 			runtime,
 		);
@@ -433,6 +439,12 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 			}
 			return await shown;
 		};
+		const runDebugHooks = this.runDebug.stepHooksForTurn({
+			runId,
+			threadId: thread.id,
+			message: turn.type === 'start' ? turn.message : undefined,
+			resumeReason: turn.type === 'resume' ? 'resume' : undefined,
+		});
 		return {
 			agent,
 			// The runtime adds the files to the model input as stored references, so the
@@ -448,6 +460,7 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 				// Recover token usage from raw provider events, so a stopped run is still billed.
 				recoverUsageOnAbort: true,
 				...modelStreamStallOptions(this.aiConfig),
+				...runDebugHooks,
 				providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } },
 				// The input carries context blocks before the user's words, so title the words only.
 				...(turn.type === 'start' ? { titleText: turn.message } : {}),
@@ -630,7 +643,7 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 			temporaryWorkflowMarkers: createThreadTemporaryWorkflowMarkers(turn.memory, turn.thread.id),
 			getProjectId: async () => turn.thread.projectId,
 			eventBus: new AssistantEventSink(
-				turn.emitHostEvent,
+				turn,
 				this.logger,
 				trace ? (event) => trace.observeEvent(event) : undefined,
 			),
@@ -654,6 +667,10 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 					});
 				}
 			},
+			recordWorkflowCodeSnapshot: this.runDebug.workflowCodeRecorderForTurn({
+				runId: options.runId,
+				threadId: turn.thread.id,
+			}),
 			readSetupItemsSnapshots: async () => [],
 			// The setup panel announces the checklist without suspending the turn.
 			markWorkflowSetupHandled: async (workflowId) =>
@@ -678,7 +695,6 @@ export class AssistantAgentProvider implements SystemAgentProvider<AssistantSand
 			setPromptConfiguration: () => {},
 			setSetupPanelEnabled: () => {},
 			getBrowserUseAvailable: () => options.request.browserUseAvailable,
-			// The Assistant agent has no threshold override. Memory uses the configured policy.
 			getObserverThresholdTokens: () => undefined,
 		};
 	}

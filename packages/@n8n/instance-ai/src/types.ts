@@ -33,6 +33,12 @@ import type {
 	SkillListResponse,
 	SkillSaveResponse,
 	SkillScope,
+	ConnectPublicSkillSource,
+	DiscoverPublicSkillSource,
+	PublicSkillSourceDiscovery,
+	PublicSkillSourceImportCheck,
+	SkillSourceConnectResponse,
+	SkillSourceListItem,
 	EvaluationMetric,
 	TaskList,
 	InstanceAiApprovalMode,
@@ -45,6 +51,9 @@ import type {
 	McpToolPermissions,
 	McpToolCallRequest,
 	McpToolCallResult,
+	WorkflowReviewBlockedDetails,
+	InstanceAiAgentFeedbackCategory,
+	InstanceAiAgentFeedbackSeverity,
 } from '@n8n/api-types';
 import type { NodeJSON, OutputSchemaLookup, WorkflowJSON } from '@n8n/workflow-sdk';
 import type {
@@ -54,6 +63,7 @@ import type {
 	INodeTypes,
 	ITaskData,
 	NodeConnectionType,
+	WorkflowEngineType,
 } from 'n8n-workflow';
 import type { z } from 'zod';
 
@@ -90,6 +100,7 @@ import type {
 	WorkflowVerificationEvidence,
 	WorkflowTriggerVerificationProgress,
 } from './workflow-loop/workflow-loop-state';
+import type { WorkflowDraftPublisher } from './tools/workflows/workflow-draft-publisher';
 
 // ── Data shapes ──────────────────────────────────────────────────────────────
 
@@ -623,6 +634,14 @@ export interface InstanceAiWorkflowService {
 		options?: { versionId?: string; name?: string; description?: string },
 	): Promise<{ activeVersionId: string }>;
 	unpublish(workflowId: string): Promise<void>;
+	/**
+	 * The workflow review rule that blocks publishing this version (the draft when omitted), or
+	 * undefined when the version may go live. Absent when the host has no review rules.
+	 */
+	getPublishReviewBlock?(
+		workflowId: string,
+		versionId?: string,
+	): Promise<WorkflowReviewBlockedDetails['reason'] | undefined>;
 	/** List version history for a workflow (metadata only, no nodes/connections). */
 	listVersions?(
 		workflowId: string,
@@ -1241,8 +1260,31 @@ export interface InstanceAiPreferenceService {
 	): void;
 }
 
+/** One report from the `send_feedback` tool. */
+export interface InstanceAiAgentFeedback {
+	category: InstanceAiAgentFeedbackCategory;
+	severity: InstanceAiAgentFeedbackSeverity;
+	summary: string;
+	toolName?: string;
+	threadId?: string;
+	runId?: string;
+}
+
+export interface InstanceAiAgentFeedbackService {
+	/** Records the report for the n8n team. Nothing replies to it. */
+	send(feedback: InstanceAiAgentFeedback): void;
+}
+
 export interface InstanceAiSkillService {
 	assistantSkillsEnabled: boolean;
+	workflowsInSkillsEnabled?: boolean;
+	sources?: {
+		list(): Promise<SkillSourceListItem[]>;
+		discover(input: DiscoverPublicSkillSource): Promise<PublicSkillSourceDiscovery>;
+		/** What an import of the selection does, before the user approves it. Stores nothing. */
+		checkImport(input: ConnectPublicSkillSource): Promise<PublicSkillSourceImportCheck>;
+		connect(input: ConnectPublicSkillSource): Promise<SkillSourceConnectResponse>;
+	};
 	list(options: {
 		query?: string;
 		scope?: SkillScope;
@@ -1698,6 +1740,12 @@ type WithResolvedAgentId<T> = T extends { agentId?: string }
 
 export type AgentContextLookup = WithResolvedAgentId<AgentContextInput>;
 
+/** Agent archive operations bound to one user and project. */
+export interface InstanceAiAgentArchiveService {
+	preview(agentId: string): Promise<{ name: string }>;
+	archive(agentId: string): Promise<{ name: string }>;
+}
+
 /** Read-only Agent context. The host binds this reader to one user and project. */
 export interface InstanceAiAgentContextReader {
 	lookup(input: AgentContextLookup): Promise<Record<string, unknown>>;
@@ -1777,6 +1825,14 @@ export type InstanceAiChangedArtifact = Pick<
 	'type' | 'id' | 'name' | 'projectId'
 >;
 
+/** The workflow engine setup of the instance. */
+export interface InstanceAiEngineSetup {
+	/** True when the `engine-v2` module is active, so the instance can run workflows on engine v2. */
+	engineV2Available: boolean;
+	/** The engine that a new workflow gets when it is saved without `settings.engineType`. */
+	newWorkflowEngine: WorkflowEngineType;
+}
+
 export interface InstanceAiContext {
 	/** Instance-wide gate for credential description output and guidance. */
 	credentialDescriptionsEnabled?: boolean;
@@ -1808,8 +1864,10 @@ export interface InstanceAiContext {
 	 * utility calls use `modelId`.
 	 */
 	utilityModelId?: ModelConfig;
-	/** Transport for those utility LLM calls. It carries no run labels. */
+	/** Transport for those utility LLM calls. It carries run labels when request labels are enabled. */
 	modelFetch?: FetchFn;
+	/** Unlabeled transport for non-LLM utility fetches such as the models.dev catalog. */
+	catalogFetch?: FetchFn;
 	/** Bills the token usage of one helper LLM call. Best effort: it never throws. */
 	onHelperUsage?: HelperUsageHook;
 	workflowService: InstanceAiWorkflowService;
@@ -1829,11 +1887,15 @@ export interface InstanceAiContext {
 	conversationHistoryService?: InstanceAiConversationHistoryReader;
 	/** Present when the user can read Agents in the bound project. */
 	agentContextService?: InstanceAiAgentContextReader;
+	/** Present when the user can archive Agents in the bound project. */
+	agentArchiveService?: InstanceAiAgentArchiveService;
 	/** Present only when the instance-context reader is enabled; its absence hides the tool. */
 	activityService?: InstanceAiActivityService;
 	/** Present only when saved preferences are enabled for this user; its
 	 *  absence hides the `save_user_preference` tool. */
 	aiPreferenceService?: InstanceAiPreferenceService;
+	/** Present when the host can record agent feedback; its absence hides `send_feedback`. */
+	agentFeedbackService?: InstanceAiAgentFeedbackService;
 	skillService?: InstanceAiSkillService;
 	appService?: InstanceAiAppService;
 	/** Per-run inventory behind `mcp-servers`' `connected` action. Captured when the
@@ -1898,6 +1960,11 @@ export interface InstanceAiContext {
 	/** Human-readable hints about licensed features that are NOT available on this instance.
 	 *  Injected into the system prompt so the agent can explain why certain capabilities are missing. */
 	licenseHints?: string[];
+	/**
+	 * The workflow engine setup of the instance. The host resolves it when it builds the
+	 * context. Absent means that new workflows run on engine v1.
+	 */
+	engineSetup?: InstanceAiEngineSetup;
 	/** Domain access tracker for HITL gating of fetch-url and similar tools. */
 	domainAccessTracker?: DomainAccessTracker;
 	/** Current run ID — used for transient (allow_once) domain approvals. */
@@ -1923,6 +1990,8 @@ export interface InstanceAiContext {
 	 * paths stay in effect.
 	 */
 	setupItemsEmitter?: SetupItemsEmitter;
+	/** Shows each compiled workflow on the canvas before the build saves it. Present only while the draft preview gate is on. */
+	workflowDraftPublisher?: WorkflowDraftPublisher;
 	/**
 	 * Setup panel v2: the setup tool announced a workflow's final checklist
 	 * instead of suspending, so the host must treat that build's setup as
@@ -2123,14 +2192,13 @@ export interface InstanceAiMemoryConfig {
 		onTaskUsage?: (report: MemoryTaskUsageReport) => void | Promise<void>;
 	};
 	/**
-	 * Generate a title for a thread that has none, after the first turn. The
-	 * runtime reports the usage of the title call through `onSideCallUsage`.
+	 * Generate a title for a thread that has none. The title call runs beside the
+	 * first turn, and the run does not wait for it. The runtime reports the usage
+	 * of the title call through `onSideCallUsage`.
 	 */
 	titleGeneration?: {
 		/** Model for the title call. Defaults to the agent's model. */
 		model?: ModelConfig;
-		/** Saves the title before the run ends, instead of after it in the background. */
-		sync?: boolean;
 	};
 }
 

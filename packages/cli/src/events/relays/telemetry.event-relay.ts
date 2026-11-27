@@ -387,6 +387,7 @@ export class TelemetryEventRelay extends EventRelay {
 			'workflow-review-version-updated': (event) => this.workflowReviewVersionUpdated(event),
 			'workflow-review-decided': (event) => this.workflowReviewDecided(event),
 			'workflow-review-closed': (event) => this.workflowReviewClosed(event),
+			'workflow-review-closed-by-user': (event) => this.workflowReviewClosedByUser(event),
 			'workflow-review-comment-created': (event) => this.workflowReviewCommentCreated(event),
 			'promotion-provider-created': (event) => this.promotionProviderCreated(event),
 			'promotion-environment-created': (event) => this.promotionEnvironmentCreated(event),
@@ -425,6 +426,10 @@ export class TelemetryEventRelay extends EventRelay {
 			'app-opened': (event) => this.appOpened(event),
 			'app-interacted': (event) => this.appInteracted(event),
 			'app-bindings-changed': (event) => this.appBindingsChanged(event),
+			'mcp-server-created': (event) => this.mcpServerCreated(event),
+			'mcp-server-deleted': (event) => this.mcpServerDeleted(event),
+			'mcp-server-tool-added': (event) => this.mcpServerToolAdded(event),
+			'mcp-server-tool-drafted': (event) => this.mcpServerToolDrafted(event),
 		});
 	}
 
@@ -620,6 +625,79 @@ export class TelemetryEventRelay extends EventRelay {
 
 	// #endregion
 
+	// #region Custom MCP servers
+
+	private mcpServerCreated({
+		serverId,
+		projectId,
+		userId,
+		source,
+		threadId,
+	}: RelayEventMap['mcp-server-created']) {
+		this.telemetry.track(TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_CREATED_CUSTOM_MCP_SERVER, {
+			server_id: serverId,
+			project_id: projectId,
+			user_id: userId,
+			source,
+			thread_id: threadId,
+		});
+	}
+
+	private mcpServerDeleted({
+		serverId,
+		projectId,
+		userId,
+		source,
+		threadId,
+	}: RelayEventMap['mcp-server-deleted']) {
+		this.telemetry.track(TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_DELETED_CUSTOM_MCP_SERVER, {
+			server_id: serverId,
+			project_id: projectId,
+			user_id: userId,
+			source,
+			thread_id: threadId,
+		});
+	}
+
+	private mcpServerToolAdded({
+		serverId,
+		userId,
+		source,
+		threadId,
+		toolKind,
+	}: RelayEventMap['mcp-server-tool-added']) {
+		this.telemetry.track(TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_ADDED_TOOL_TO_CUSTOM_MCP_SERVER, {
+			server_id: serverId,
+			user_id: userId,
+			source,
+			thread_id: threadId,
+			tool_kind: toolKind,
+		});
+	}
+
+	private mcpServerToolDrafted({
+		serverId,
+		userId,
+		source,
+		threadId,
+		field,
+		status,
+	}: RelayEventMap['mcp-server-tool-drafted']) {
+		this.telemetry.track(
+			TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_DRAFTED_TOOL_OF_CUSTOM_MCP_SERVER,
+			{
+				server_id: serverId,
+				user_id: userId,
+				source,
+				thread_id: threadId,
+				field,
+				status,
+			},
+		);
+	}
+
+	// #endregion
+
 	// #region Apps
 
 	private appCreated({
@@ -720,6 +798,8 @@ export class TelemetryEventRelay extends EventRelay {
 		projectId,
 		versionId,
 		userId,
+		threadId,
+		source,
 		workflowCount,
 		dataTableCount,
 		agentCount,
@@ -731,6 +811,8 @@ export class TelemetryEventRelay extends EventRelay {
 			project_id: projectId,
 			version_id: versionId,
 			user_id: userId,
+			thread_id: threadId,
+			source,
 			workflow_count: workflowCount,
 			data_table_count: dataTableCount,
 			agent_count: agentCount,
@@ -870,6 +952,7 @@ export class TelemetryEventRelay extends EventRelay {
 		rulesAfter,
 		shadowWarningCount,
 		notLoadedWarningCount,
+		origin,
 	}: RelayEventMap['node-type-policy-saved']) {
 		if (!isPolicyKind(kind)) return;
 
@@ -896,6 +979,7 @@ export class TelemetryEventRelay extends EventRelay {
 				shadow_warning_count: shadowWarningCount,
 				not_loaded_warning_count: notLoadedWarningCount,
 				version: after.version,
+				origin: origin ?? 'save',
 			},
 		);
 	}
@@ -3082,6 +3166,20 @@ export class TelemetryEventRelay extends EventRelay {
 			workflow_review_request_id: workflowReviewRequestId,
 			cause_trigger: cause.trigger,
 			cause_actor_kind: cause.actorKind,
+		});
+	}
+
+	private workflowReviewClosedByUser({
+		user,
+		workflowReviewRequestId,
+		workflowId,
+		workflowVersionId,
+	}: RelayEventMap['workflow-review-closed-by-user']) {
+		this.telemetry.track(TELEMETRY_EVENT.WORKFLOW_REVIEWS.USER_CLOSED_WORKFLOW_REVIEW, {
+			user_id: user.id,
+			workflow_review_request_id: workflowReviewRequestId,
+			workflow_id: workflowId,
+			workflow_version_id: workflowVersionId,
 		});
 	}
 

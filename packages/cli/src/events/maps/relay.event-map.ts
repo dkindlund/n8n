@@ -1,6 +1,7 @@
 import type { AppEventMap } from '@n8n/backend-module-apps';
 import type { DataTableEventMap } from '@n8n/backend-module-data-table';
 import type { ExecutionLimitsEventMap } from '@n8n/backend-module-execution-limits';
+import type { McpServerEventMap } from '@n8n/backend-module-mcp-servers';
 import type {
 	AuthenticationMethod,
 	BreakingChangeLightReportResult,
@@ -12,6 +13,7 @@ import type {
 	PromotionProviderAuthType,
 	PromotionProviderType,
 	PromotionReviewType,
+	PromotionSettings,
 	PublicApiRateLimitSettings,
 	RedactionFloor,
 	ScimDeprovisioningPolicy,
@@ -104,7 +106,7 @@ export type ProjectSummary = {
 	name: string;
 };
 
-type ModuleEventMap = DataTableEventMap & AppEventMap & ExecutionLimitsEventMap;
+type ModuleEventMap = DataTableEventMap & AppEventMap & ExecutionLimitsEventMap & McpServerEventMap;
 
 export type RelayEventMap = ModuleEventMap & {
 	// #region Lifecycle
@@ -1558,6 +1560,14 @@ export type RelayEventMap = ModuleEventMap & {
 				settingName: 'data_redaction_enforcement_floor';
 				value: RedactionFloor;
 		  }
+		| {
+				settingName:
+					| 'promotions_who_can_promote'
+					| 'promotions_who_can_approve'
+					| 'promotions_who_can_apply'
+					| 'promotions_require_approval';
+				value: PromotionSettings[keyof PromotionSettings];
+		  }
 	);
 
 	'redaction-enforcement-updated': {
@@ -1575,9 +1585,30 @@ export type RelayEventMap = ModuleEventMap & {
 		after: Partial<Omit<PublicApiRateLimitSettings, 'enabled'>>;
 	};
 
+	/** `before` and `after` hold only the promotion settings that changed. */
+	'promotion-settings-updated': {
+		user: UserLike;
+		before: Partial<PromotionSettings>;
+		after: Partial<PromotionSettings>;
+		/** Login of the service account that acted. Absent for people and outside a request. */
+		loginId?: string;
+	};
+
 	// #endregion
 
 	// #region Workflow Reviews
+
+	'project-workflow-review-settings-updated': {
+		user: UserLike;
+		projectId: string;
+		requiredByProject: boolean;
+	};
+
+	'project-workflow-review-required-by-instance-updated': {
+		user: UserLike;
+		projectId: string;
+		requiredByInstance: boolean;
+	};
 
 	'workflow-review-requested': {
 		user: UserLike;
@@ -1610,8 +1641,8 @@ export type RelayEventMap = ModuleEventMap & {
 	/**
 	 * Closed without a decision, by the workflow lifecycle hooks or the reconciliation
 	 * sweep. An approval closes the request too but emits 'workflow-review-decided'
-	 * instead, never both: every close path filters `state = 'open'` and `decide()`
-	 * closes in-line.
+	 * instead, and a user close emits 'workflow-review-closed-by-user', never both: every
+	 * close path filters `state = 'open'` and `decide()` closes in-line.
 	 */
 	'workflow-review-closed': {
 		workflowReviewRequestId: string;
@@ -1627,6 +1658,15 @@ export type RelayEventMap = ModuleEventMap & {
 			actorKind: 'user' | 'system';
 			userId: string | null;
 		};
+	};
+
+	/** Closed by a user without an approval. The decision keeps its last value. */
+	'workflow-review-closed-by-user': {
+		user: UserLike;
+		workflowReviewRequestId: string;
+		workflowId: string;
+		/** Null when the pinned version was pruned before the close. */
+		workflowVersionId: string | null;
 	};
 
 	'workflow-review-comment-created': {
@@ -2004,6 +2044,8 @@ export type RelayEventMap = ModuleEventMap & {
 		rulesAfter: readonly PolicyRule[];
 		shadowWarningCount: number;
 		notLoadedWarningCount: number;
+		/** `add-project-policy` is the one-call create of an empty project policy. Absent means a composed save. */
+		origin?: 'add-project-policy';
 	};
 
 	'node-type-policy-attachments-updated': {

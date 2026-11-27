@@ -37,6 +37,7 @@ import {
 	buildAgentTraceInputs,
 	mergeTraceRunInputs,
 	modelIdTraceMetadata,
+	setTraceApprovalMode,
 	setTraceModelId,
 	setTracePromptVersion,
 } from '../tracing/langsmith-tracing';
@@ -221,6 +222,9 @@ export async function createInstanceAgent(
 			conversationHistoryEnabled: Boolean(context.conversationHistoryService),
 			preferenceSavingEnabled: Boolean(context.aiPreferenceService),
 			skillManagementEnabled: Boolean(context.skillService),
+			agentArchiveEnabled:
+				orchestratorDomainTools.has(DOMAIN_TOOL_IDS.ARCHIVE_AGENT) &&
+				allOrchestratorTools.has(DOMAIN_TOOL_IDS.ARCHIVE_AGENT),
 			// The host only sets `startCloudBrowserTask` when the cloud browser is enabled for the instance.
 			cloudBrowserEnabled: Boolean(orchestrationContext?.startCloudBrowserTask),
 			setupPanelEnabled: isSetupPanelEnabled(context),
@@ -229,6 +233,8 @@ export async function createInstanceAgent(
 			fileListingEnabled: allOrchestratorTools.has(DOMAIN_TOOL_IDS.LIST_FILES),
 			fileSharingEnabled: allOrchestratorTools.has(DOMAIN_TOOL_IDS.SHARE_FILES),
 			fileViewingEnabled: allOrchestratorTools.has(DOMAIN_TOOL_IDS.VIEW_FILE),
+			feedbackToolEnabled: allOrchestratorTools.has(DOMAIN_TOOL_IDS.SEND_FEEDBACK),
+			engineSetup: context.engineSetup,
 			workspaceRoot:
 				orchestrationContext?.workspace && orchestrationContext.workspaceRoot
 					? orchestrationContext.workspaceRoot
@@ -241,6 +247,7 @@ export async function createInstanceAgent(
 		orchestrationContext?.promptConfiguration?.version,
 	);
 	setTraceModelId(orchestrationContext?.tracing, modelId);
+	setTraceApprovalMode(orchestrationContext?.tracing, context.approvalMode);
 	const functionId = 'instance-ai.orchestrator';
 	const telemetry = orchestrationContext?.tracing?.getTelemetry?.({
 		agentRole: 'orchestrator',
@@ -309,7 +316,7 @@ export async function createInstanceAgent(
 	if (orchestrationContext?.workspace) agent.workspace(orchestrationContext.workspace);
 	if (skills) {
 		agent.skills(skills);
-		agent.contextCueProvider(createInstanceAiContextCueProvider());
+		agent.contextCueProvider(createInstanceAiContextCueProvider(context.engineSetup));
 	}
 
 	if (options.memory) {

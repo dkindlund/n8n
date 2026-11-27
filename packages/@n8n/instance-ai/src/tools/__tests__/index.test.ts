@@ -534,6 +534,26 @@ describe('domain tool construction', () => {
 		expect(withService.has('save_user_preference')).toBe(true);
 	});
 
+	it('registers send_feedback only when the feedback service is wired', () => {
+		expect(createOrchestratorDomainTools(makeContext()).get('send_feedback')).toBeUndefined();
+
+		const enabled = makeContext({ agentFeedbackService: { send: vi.fn() } });
+		expect(createOrchestratorDomainTools(enabled).get('send_feedback')).toBeDefined();
+		expect(getActiveOrchestratorDomainToolNames(enabled)).toContain('send_feedback');
+	});
+
+	it('does not register send_feedback when the instance does not share data', () => {
+		const context = makeContext({
+			agentFeedbackService: { send: vi.fn() },
+			allowSendingParameterValues: false,
+		});
+		expect(createOrchestratorDomainTools(context).get('send_feedback')).toBeUndefined();
+	});
+
+	it('never defers send_feedback behind search_tools', () => {
+		expect(ALWAYS_LOADED_TOOL_NAMES.has('send_feedback')).toBe(true);
+	});
+
 	it('never defers mcp-servers behind search_tools', () => {
 		expect(ALWAYS_LOADED_TOOL_NAMES.has('mcp-servers')).toBe(true);
 	});
@@ -551,6 +571,26 @@ describe('domain tool construction', () => {
 		});
 		expect(createOrchestratorDomainTools(enabled).get('agent-context')).toBeDefined();
 		expect(getActiveOrchestratorDomainToolNames(enabled)).toContain('agent-context');
+	});
+
+	it('exposes archive_agent only to the orchestrator on writable turns with an archive service', () => {
+		const agentContextService = { lookup: vi.fn() };
+		const agentArchiveService = { preview: vi.fn(), archive: vi.fn() };
+		const readerOnly = makeContext({ agentContextService });
+		const writable = makeContext({ agentContextService, agentArchiveService });
+		const readOnly = makeContext({
+			agentContextService,
+			agentArchiveService,
+			branchReadOnly: true,
+		});
+
+		expect(createOrchestratorDomainTools(readerOnly).has('archive_agent')).toBe(false);
+		expect(createOrchestratorDomainTools(writable).has('archive_agent')).toBe(true);
+		expect(getActiveOrchestratorDomainToolNames(writable)).toContain('archive_agent');
+		expect(getActiveOrchestratorDomainToolNames(readOnly)).not.toContain('archive_agent');
+		expect(getActiveOrchestratorDomainToolNames(readOnly)).toContain('agent-context');
+		expect(ALWAYS_LOADED_TOOL_NAMES.has('archive_agent')).toBe(false);
+		expect(getToolGroup('archive_agent')).toBe('agents');
 	});
 
 	it('never defers Agent context lookup behind search_tools', () => {

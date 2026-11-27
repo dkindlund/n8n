@@ -6,12 +6,8 @@ import {
 	pushHandlerRegistry,
 } from '@n8n/frontend-module-sdk';
 import type { FrontendModuleDescription } from '@n8n/frontend-module-sdk';
-import type { N8nEnvFeatFlags } from '@n8n/api-types';
-import {
-	INSTANCE_POLICY_VIEW,
-	POLICIES_LANDING_VIEW,
-} from '@n8n/frontend-module-type-availability-policies';
 import { useSettingsStore } from '@n8n/stores/settings.store';
+import { useUsersStore } from '@n8n/stores/users.store';
 import merge from 'lodash/merge';
 
 import router from '@/app/router';
@@ -29,6 +25,7 @@ import {
 	IMPORT_CSV_MODAL_KEY,
 } from '@/features/core/dataTable/constants';
 import { defaultSettings } from '@n8n/frontend-test-utils';
+import { useUserHelpers } from '@/app/composables/useUserHelpers';
 
 it('keeps Agents settings reachable while the Agents routes are disabled', () => {
 	setActivePinia(createPinia());
@@ -59,50 +56,64 @@ it('keeps Agents settings reachable while the Agents routes are disabled', () =>
 	expect(check?.({ to: { ...agentsRoute, name: AGENTS_LIST_VIEW }, from, next })).toBe(false);
 });
 
-describe('node and credential policy routes', () => {
-	const FLAG = 'N8N_ENV_FEAT_NODE_AND_CREDENTIAL_POLICIES_SETTINGS';
-
-	afterEach(() => {
-		vi.unstubAllEnvs();
-	});
-
-	function checkPolicyRoutes(envFeatureFlags: N8nEnvFeatFlags) {
-		setActivePinia(createPinia());
-		useSettingsStore().setSettings(
-			merge({}, defaultSettings, {
-				activeModules: ['type-availability-policies'],
-				envFeatureFlags,
-			}),
-		);
+// No backend module has the id `api-keys`, so the module is never active. Its page must
+// still open for every signed-in user, as it did when the route was in the shell.
+describe('API keys settings route', () => {
+	const createTestRouter = () => {
 		const stub = { render: () => null };
-		const testRouter = createRouter({
+		return createRouter({
 			history: createMemoryHistory(),
 			routes: [
 				{ path: '/settings', name: VIEWS.SETTINGS, component: stub },
 				{ path: '/projects/:projectId', name: VIEWS.PROJECT_DETAILS, component: stub },
 			],
 		});
+	};
+
+	beforeEach(() => {
+		setActivePinia(createPinia());
+		useSettingsStore().setSettings(merge({}, defaultSettings, { activeModules: [] }));
+	});
+
+	it('resolves under settings at the same path', () => {
+		const testRouter = createTestRouter();
 		registerModuleRoutes(testRouter);
-		const from = testRouter.currentRoute.value;
-		return [POLICIES_LANDING_VIEW, INSTANCE_POLICY_VIEW].map((name) => {
-			const to = testRouter.resolve({ name });
-			return to.meta.middlewareOptions?.custom?.({ to: { ...to, name }, from, next: vi.fn() });
-		});
-	}
 
-	it('opens the policy pages while the flag is on', () => {
-		expect(checkPolicyRoutes({ [FLAG]: 'true' })).toEqual([true, true]);
+		expect(testRouter.resolve({ name: VIEWS.API_SETTINGS }).path).toBe('/settings/api');
 	});
 
-	it('blocks the policy pages while the flag is not set', () => {
-		// Without a value in the settings, `useEnvFeatureFlag` reads the build-time env.
-		vi.stubEnv(FLAG, undefined);
+	it('runs no module availability check while the module is inactive', () => {
+		expect(useSettingsStore().isModuleActive('api-keys')).toBe(false);
+		const testRouter = createTestRouter();
+		registerModuleRoutes(testRouter);
 
-		expect(checkPolicyRoutes({})).toEqual([false, false]);
+		const route = testRouter.resolve({ name: VIEWS.API_SETTINGS });
+
+		expect(route.meta.moduleName).toBe('api-keys');
+		expect(route.meta.middleware).toEqual(['authenticated']);
+		expect(route.meta.middlewareOptions?.custom).toBeUndefined();
 	});
 
-	it('blocks the policy pages while the flag is false', () => {
-		expect(checkPolicyRoutes({ [FLAG]: 'false' })).toEqual([false, false]);
+	it('is open to a signed-in user and closed to a visitor', () => {
+		const testRouter = createTestRouter();
+		registerModuleRoutes(testRouter);
+		const { canUserAccessRouteByName } = useUserHelpers(testRouter);
+
+		expect(canUserAccessRouteByName(VIEWS.API_SETTINGS)).toBe(false);
+
+		const usersStore = useUsersStore();
+		usersStore.addUsers([
+			{
+				id: 'user-1',
+				email: 'user@example.com',
+				firstName: 'Test',
+				lastName: 'User',
+				isPending: false,
+			},
+		]);
+		usersStore.currentUserId = 'user-1';
+
+		expect(canUserAccessRouteByName(VIEWS.API_SETTINGS)).toBe(true);
 	});
 });
 

@@ -3,7 +3,6 @@ import { computed, nextTick, onBeforeUnmount, ref, watch, type Component, type R
 import { useI18n, type BaseTextKey } from '@n8n/i18n';
 import type { ITelemetryTrackProperties } from 'n8n-workflow';
 import ChatInputBase from '@/features/ai/shared/components/ChatInputBase.vue';
-import { EXTENDED_PROMPT_MAX_LENGTH } from '@/features/ai/shared/constants';
 import AttachmentPreview from './AttachmentPreview.vue';
 import { N8nAttachment, N8nAttachmentGroup } from '@n8n/design-system';
 import { useAttachmentPreviews } from '@/features/ai/shared/composables/useAttachmentPreviews';
@@ -12,6 +11,7 @@ import InstanceAiInputMenu from './InstanceAiInputMenu.vue';
 import { convertFileToBinaryData } from '@/app/utils/fileUtils';
 import {
 	base64EncodedSize,
+	EXTENDED_PROMPT_MAX_LENGTH,
 	type InstanceAiAttachment,
 	type InstanceAiResourceAttachment,
 } from '@n8n/api-types';
@@ -26,7 +26,10 @@ import type {
 	AssistantMentionSelection,
 	WorkflowArtifactReference,
 } from '@/features/ai/assistant-at-mentions/assistantAtMentions.types';
-import { buildMentionKey } from '@/features/ai/assistant-at-mentions/utils/buildMentionItems';
+import {
+	buildAgentMentionKey,
+	buildMentionKey,
+} from '@/features/ai/assistant-at-mentions/utils/buildMentionItems';
 import { INSTANCE_AI_EMPTY_STATE_SUGGESTIONS_VERSION } from '../emptyStateSuggestions';
 import { useInstanceAiPromptSuggestionsTelemetry } from '../instanceAiPromptSuggestions.telemetry';
 import { instanceAiResponseNow } from '../instanceAi.responseTiming';
@@ -111,9 +114,7 @@ const props = withDefaults(
 		mentionActiveWorkflowId?: string;
 		reservedAttachmentCount?: number;
 		isOutOfCredits?: boolean;
-		/** Undefined keeps the default "+" menu; a string replaces it with a plain attach button restricted to those MIME types (`''` hides attaching). */
-		attachOnlyMimeTypes?: string;
-		/** Restricts the accepted file types, as an `accept` string, and keeps the "+" menu. `attachOnlyMimeTypes` wins when both are set. */
+		/** Restricts the accepted file types, as an `accept` string. */
 		acceptedMimeTypes?: string;
 	}>(),
 	{
@@ -289,9 +290,6 @@ defineExpose({
 	isDirty,
 	insertSuggestion: handleSuggestionInsert,
 	submitSuggestion,
-	// Lets a host disable other controls (e.g. an agent picker) while a file
-	// attachment is still encoding, so they cannot change who a send targets.
-	isPreparingSubmission,
 	getSendStopButtonElement: () => chatInputRef.value?.getSendStopButtonElement(),
 });
 
@@ -311,12 +309,22 @@ const excludedMentionContext = computed(() => {
 			buildMentionKey('workflow', props.contextChip.workflowId, props.contextChip.workflowId),
 		);
 		workflowIds.add(props.contextChip.workflowId);
+	} else if (
+		props.contextChip?.type === 'agent-artifact' ||
+		props.contextChip?.type === 'agent-preview-session'
+	) {
+		// The hand-off chip already gives the agent as context.
+		keys.add(buildAgentMentionKey(props.contextChip.agentId));
 	}
 
 	for (const attachment of attachedResources.value) {
 		if (attachment.type === 'workflow') {
 			keys.add(buildMentionKey('workflow', attachment.id, attachment.id));
 			workflowIds.add(attachment.id);
+			continue;
+		}
+		if (attachment.type === 'agent') {
+			keys.add(buildAgentMentionKey(attachment.id));
 			continue;
 		}
 		if (attachment.type !== 'nodes') continue;
@@ -344,9 +352,6 @@ const isComposerDirty = computed(() => hasNonWhitespaceDraftText.value || hasAtt
 watch(isComposerDirty, (hasContent) => emit('content-change', hasContent), { immediate: true });
 const isGatedBySetup = computed(
 	() => props.isAwaitingConfirmation || !props.isWorkflowBuilderAvailable,
-);
-const showAttach = computed(
-	() => props.attachOnlyMimeTypes === undefined || props.attachOnlyMimeTypes.length > 0,
 );
 const shouldShowMentions = computed(() => props.mentionsEnabled && Boolean(props.mentionProjectId));
 const mentionAvailability = useAssistantMentionAvailability({
@@ -401,9 +406,11 @@ const mentionAttachments = useAssistantMentionAttachments({
  * picking it does not move the thread's tabs or preview around.
  */
 async function handleMentionSelection(selection: AssistantMentionSelection): Promise<void> {
-	const existingArtifact = props.mentionArtifacts.find(
-		(artifact) => artifact.id === selection.item.workflowId,
-	);
+	const { item } = selection;
+	const existingArtifact =
+		item.kind === 'agent'
+			? undefined
+			: props.mentionArtifacts.find((artifact) => artifact.id === item.workflowId);
 	const result = mentionAttachments.select(selection);
 	if (result.status === 'limit') {
 		toast.showError(
@@ -919,9 +926,9 @@ const resizable = computed(() => {
 			:composer-height="props.composerHeight"
 			:max-length="EXTENDED_PROMPT_MAX_LENGTH"
 			show-voice
-			:show-attach="showAttach"
-			:show-attach-button="props.attachOnlyMimeTypes !== undefined"
-			:accepted-mime-types="props.attachOnlyMimeTypes ?? props.acceptedMimeTypes"
+			show-attach
+			:show-attach-button="false"
+			:accepted-mime-types="props.acceptedMimeTypes"
 			:attached-encoded-bytes="attachedEncodedBytes"
 			@update:model-value="mentions.handleTextChange"
 			@submit="handleSubmit"
@@ -970,17 +977,9 @@ const resizable = computed(() => {
 					/>
 				</N8nAttachmentGroup>
 			</template>
-			<template
-				v-if="
-					$slots['footer-start'] ||
-					$slots['footer-after-menu'] ||
-					props.attachOnlyMimeTypes === undefined
-				"
-				#footer-start
-			>
+			<template #footer-start>
 				<slot name="footer-start" />
 				<InstanceAiInputMenu
-					v-if="props.attachOnlyMimeTypes === undefined"
 					:disabled="isBusy || isGatedBySetup"
 					:is-streaming="props.isStreaming"
 					:project-id="props.mentionProjectId"

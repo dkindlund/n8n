@@ -40,7 +40,7 @@ export interface ToolCall {
 	endTime?: number;
 	/**
 	 * One-line answer label rendered next to the tool name in
-	 * `AgentChatToolSteps`. Set when an interactive tool resolves so the user
+	 * `AgentChatActivity`. Set when an interactive tool resolves so the user
 	 * sees what they picked (e.g. "Slack") instead of just "ask_user".
 	 */
 	displaySummary?: string;
@@ -179,6 +179,12 @@ export interface AgentsChatMessage {
 	interactives?: InteractivePayload[];
 	interactive?: InteractivePayload;
 	attachments?: ChatMessageAttachment[];
+	/**
+	 * Resources that a user turn sent, for example mentioned workflows. The chat
+	 * host gives them for a message it sends, and a system agent gives them in
+	 * the history. The chat host owns the shape and shows them.
+	 */
+	references?: unknown[];
 	/** Persisted agent execution id for this turn (history parse or live SSE `done`). */
 	executionId?: string;
 	/** Epoch ms when this turn was sent. Drives the chat's timestamp dividers. */

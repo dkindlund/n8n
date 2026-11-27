@@ -3,7 +3,7 @@
 import { createPairedItemPagination } from './fixtures/paired-item-pagination';
 import * as Helpers from './helpers';
 import type * as NativeEvaluation from '../src/expressions/native-evaluation';
-import { canVerifyNatively, nativeSkeleton } from '../src/expressions/native-evaluation/verify';
+import { canVerifyNatively, nativeSkeleton } from '../src/expressions/native-evaluation';
 import type { IDataObject } from '../src/interfaces';
 import { createRunExecutionData } from '../src/run-execution-data-factory';
 import type { Workflow } from '../src/workflow';
@@ -257,6 +257,18 @@ describe('Expression - native evaluation verify mode', () => {
 				expect(report).not.toHaveBeenCalled();
 			} finally {
 				evaluateSpy.mockRestore();
+			}
+		});
+
+		test('does not report an evaluation after the workflow released its isolate', async () => {
+			const { workflow } = modules;
+			await workflow.expression.releaseIsolate();
+			try {
+				expect(() => evaluate('={{ $json.user.name }}', { user: { name: 'Ada' } })).toThrow();
+				expect(evaluateNatively).toHaveReturnedWith({ handled: true, value: 'Ada' });
+				expect(report).not.toHaveBeenCalled();
+			} finally {
+				await workflow.expression.acquireIsolate();
 			}
 		});
 

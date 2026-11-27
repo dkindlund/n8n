@@ -42,6 +42,9 @@ import {
 	describeRestrictedNodeTypes,
 	collectRestrictedNodeTypes,
 } from '@n8n/frontend-module-type-availability-policies';
+import { describeEngineV2Block } from '@n8n/frontend-module-engine-v2';
+import { useWorkflowEngineV2Compatibility } from '@/app/composables/useWorkflowEngineV2Compatibility';
+import { useOpenEngineV2Findings } from '@/app/composables/useOpenEngineV2Findings';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 import { createEventBus } from '@n8n/utils/event-bus';
 import type { WorkflowVersionFormModalEventBusEvents } from '@/features/workflows/workflowHistory/components/WorkflowVersionFormModal.vue';
@@ -104,7 +107,7 @@ const toast = useToast();
 const saveStore = useWorkflowSaveStore();
 const { saveCurrentWorkflow, cancelAutoSave } = useWorkflowSaving({ router });
 const workflowActivate = useWorkflowActivate();
-const { isWorkflowReviewsEnabled, isReviewRequiredFor } = useWorkflowReviewsFeature();
+const { isWorkflowReviewsEnabled, reviewRequiredBy } = useWorkflowReviewsFeature();
 const reviewRequiredStore = useReviewRequiredStore();
 const reviewStatusStore = useWorkflowReviewStatusStore();
 const { publishChoiceDismissed, submittedDialogDismissed } = useWorkflowReviewDialogPreferences();
@@ -118,7 +121,10 @@ const reviewsApply = computed(
 	() => isWorkflowReviewsEnabled.value && (!isPersonalWorkflow.value || hasOpenReview.value),
 );
 
-const isApprovalAlwaysRequired = computed(() => isReviewRequiredFor(homeProject.value));
+const approvalRequiredBy = computed(() =>
+	reviewRequiredBy({ id: props.id, homeProject: homeProject.value }),
+);
+const isApprovalRequired = computed(() => approvalRequiredBy.value !== null);
 
 /** Whether the editor holds anything beyond the live version. */
 const hasUnpublishedChanges = computed(
@@ -141,12 +147,11 @@ const savedVersionIsApproved = computed(() => {
 });
 
 const mustSubmitForReview = computed(
-	() =>
-		isApprovalAlwaysRequired.value && !savedVersionIsLive.value && !savedVersionIsApproved.value,
+	() => isApprovalRequired.value && !savedVersionIsLive.value && !savedVersionIsApproved.value,
 );
 
 const effectiveReviewRequired = computed(() =>
-	isApprovalAlwaysRequired.value
+	isApprovalRequired.value
 		? hasOpenReview.value || mustSubmitForReview.value
 		: hasOpenReview.value || reviewRequiredStore.isReviewRequired(props.id),
 );
@@ -176,6 +181,7 @@ const isReviewUpdateBlocked = computed(
 );
 
 const autoSaveForPublish = ref(false);
+const isCheckingReviewStatus = ref(false);
 const isSaving = ref(false);
 const showPublishChoiceDialog = ref(false);
 const showSubmitForReviewDialog = ref(false);
@@ -230,21 +236,50 @@ const restrictedNodeTypes = computed(() =>
 
 const hasRestrictedNodeTypes = computed(() => restrictedNodeTypes.value.length > 0);
 
+const { blockingReasons: engineV2BlockingReasons } =
+	useWorkflowEngineV2Compatibility(workflowDocumentStore);
+const hasEngineV2BlockingReasons = computed(() => engineV2BlockingReasons.value.length > 0);
+
 const isWorkflowPublishable = computed(
-	() => containsTrigger.value && !hasNodeIssues.value && !hasRestrictedNodeTypes.value,
+	() =>
+		containsTrigger.value &&
+		!hasNodeIssues.value &&
+		!hasRestrictedNodeTypes.value &&
+		!hasEngineV2BlockingReasons.value,
 );
 
-/** Why publishing is blocked, or '' when it is not. Also the Publish tooltip. */
-const publishBlockedReason = computed(() => {
-	if (isWorkflowPublishable.value) return '';
-	if (!containsTrigger.value) return i18n.baseText('workflows.publishModal.noTriggerMessage');
-	if (hasRestrictedNodeTypes.value) return describeRestrictedNodeTypes(restrictedNodeTypes.value);
+/** Why publishing is blocked, and if engine v2 is the reason. */
+const publishBlock = computed((): { reason: string; byEngineV2: boolean } => {
+	if (isWorkflowPublishable.value) return { reason: '', byEngineV2: false };
+	if (!containsTrigger.value) {
+		return { reason: i18n.baseText('workflows.publishModal.noTriggerMessage'), byEngineV2: false };
+	}
+	if (hasRestrictedNodeTypes.value) {
+		return { reason: describeRestrictedNodeTypes(restrictedNodeTypes.value), byEngineV2: false };
+	}
+	if (hasEngineV2BlockingReasons.value)
+		return { reason: describeEngineV2Block(), byEngineV2: true };
 
-	return i18n.baseText('workflowActivator.showMessage.activeChangedNodesIssuesExistTrue.title', {
-		interpolate: { count: nodesWithValidationIssues.value.length },
-		adjustToNumber: nodesWithValidationIssues.value.length,
-	});
+	return {
+		reason: i18n.baseText('workflowActivator.showMessage.activeChangedNodesIssuesExistTrue.title', {
+			interpolate: { count: nodesWithValidationIssues.value.length },
+			adjustToNumber: nodesWithValidationIssues.value.length,
+		}),
+		byEngineV2: false,
+	};
 });
+
+/** Why publishing is blocked, or '' when it is not. Also the Publish tooltip. */
+const publishBlockedReason = computed(() => publishBlock.value.reason);
+
+const openEngineV2Findings = useOpenEngineV2Findings();
+
+/** The Publish tooltip links to the findings when engine v2 is why Publish is off. */
+const showEngineV2FindingsLink = computed(
+	() =>
+		publishBlock.value.byEngineV2 &&
+		publishButtonConfig.value.tooltip === publishBlockedReason.value,
+);
 
 type WorkflowPublishState =
 	| 'not-published-not-eligible' // No trigger nodes or has errors
@@ -281,7 +316,7 @@ const workflowPublishState = computed((): WorkflowPublishState => {
 		return 'published-invalid-trigger';
 	}
 
-	if (hasNodeIssues.value || hasRestrictedNodeTypes.value) {
+	if (hasNodeIssues.value || hasRestrictedNodeTypes.value || hasEngineV2BlockingReasons.value) {
 		return 'published-node-issues';
 	}
 
@@ -432,7 +467,24 @@ const onPublishButtonClick = async () => {
 		return;
 	}
 
-	if (!(await ensureWorkflowSaved())) return;
+	if (hasEngineV2BlockingReasons.value) {
+		toast.showMessage({ title: describeEngineV2Block(), type: 'warning' });
+		return;
+	}
+
+	if (isCheckingReviewStatus.value) return;
+	isCheckingReviewStatus.value = true;
+	let workflowId = props.id;
+	try {
+		if (!(await ensureWorkflowSaved())) return;
+		// Saving a new workflow changes the ID, so capture it after the save.
+		workflowId = props.id;
+		await refetchReviewStatus();
+	} finally {
+		isCheckingReviewStatus.value = false;
+	}
+	// The user may have opened another workflow while the requests ran.
+	if (props.id !== workflowId) return;
 
 	if (reviewsApply.value) {
 		// Best effort: a status that is not fetched yet reads as "no open review".
@@ -449,7 +501,7 @@ const onPublishButtonClick = async () => {
 		}
 
 		// TODO(LIGO-784): once the designed secondary affordance exists, revisit this gate
-		if (!isApprovalAlwaysRequired.value && !publishChoiceDismissed.value) {
+		if (!isApprovalRequired.value && !publishChoiceDismissed.value) {
 			showPublishChoiceDialog.value = true;
 			return;
 		}
@@ -469,45 +521,6 @@ const publishButtonConfig = computed(() => {
 			indicatorClass: activeVersion.value ? 'published' : '',
 			tooltip: unusableCredentialReason.value,
 			showVersionInfo: !!activeVersion.value,
-		};
-	}
-
-	// Handle permission-denied state first
-	if (!hasPublishPermission.value) {
-		const defaultConfigForNoPermission = {
-			text: i18n.baseText('workflows.publish'),
-			enabled: false,
-			loading: false,
-			showIndicator: false,
-			indicatorClass: '',
-			tooltip: isPersonalSpace.value
-				? i18n.baseText('workflows.publish.personalSpaceRestricted')
-				: i18n.baseText('workflows.publish.permissionDenied'),
-			showVersionInfo: false,
-		};
-		const isWorkflowPublished = !!activeVersion.value;
-		if (isWorkflowPublished) {
-			return {
-				...defaultConfigForNoPermission,
-				showIndicator: true,
-				showVersionInfo: true,
-				indicatorClass: 'published',
-			};
-		} else {
-			return defaultConfigForNoPermission;
-		}
-	}
-
-	// Handle new workflow state
-	if (props.isNewWorkflow) {
-		return {
-			text: i18n.baseText('workflows.publish'),
-			enabled: isWorkflowPublishable.value,
-			loading: false,
-			showIndicator: false,
-			indicatorClass: '',
-			tooltip: publishBlockedReason.value,
-			showVersionInfo: false,
 		};
 	}
 
@@ -596,7 +609,29 @@ const publishButtonConfig = computed(() => {
 		},
 	};
 
-	return configs[workflowPublishState.value];
+	const stateConfig = props.isNewWorkflow
+		? {
+				text: i18n.baseText('workflows.publish'),
+				enabled: isWorkflowPublishable.value,
+				loading: false,
+				showIndicator: false,
+				indicatorClass: '',
+				tooltip: publishBlockedReason.value,
+				showVersionInfo: false,
+			}
+		: configs[workflowPublishState.value];
+
+	if (!hasPublishPermission.value) {
+		return {
+			...stateConfig,
+			enabled: false,
+			tooltip: isPersonalSpace.value
+				? i18n.baseText('workflows.publish.personalSpaceRestricted')
+				: i18n.baseText('workflows.publish.permissionDenied'),
+		};
+	}
+
+	return stateConfig;
 });
 
 const shouldHidePublishButton = computed(() => {
@@ -679,6 +714,48 @@ const enum VERSION_ACTIONS {
 	UNPUBLISH = 'unpublish',
 }
 
+/** Why Publish is disabled in the version menu, or '' when it is available. */
+const publishDisabledReason = computed(() => {
+	if (!shouldDisablePublishButton.value) return '';
+	if (collaborationReadOnly.value) {
+		return collaborationStore.isCurrentUserWriter
+			? i18n.baseText('workflows.publish.readOnlyAnotherTab')
+			: i18n.baseText('workflows.publish.readOnly');
+	}
+	if (unusableCredentialReason.value) return unusableCredentialReason.value;
+	if (!hasPublishPermission.value) {
+		return isPersonalSpace.value
+			? i18n.baseText('workflows.publish.personalSpaceRestricted')
+			: i18n.baseText('workflows.publish.permissionDenied');
+	}
+	if (reviewsApply.value && isReviewUpdateBlocked.value) {
+		return openReviewRequest.value?.decision === 'changes_requested'
+			? i18n.baseText('workflows.publish.changesRequested')
+			: i18n.baseText('workflows.publish.waitingForReview');
+	}
+	if (workflowPublishState.value === 'publishing') return publishButtonConfig.value.tooltip;
+	if (publishBlockedReason.value) return publishBlockedReason.value;
+	if (props.isNewWorkflow) return i18n.baseText('workflows.publish.unsaved');
+	if (workflowPublishState.value === 'published-no-changes') {
+		return i18n.baseText('workflows.publishModal.noChanges');
+	}
+
+	return publishButtonConfig.value.tooltip;
+});
+
+/** Why Unpublish is disabled, or '' when it is not. Also the tooltip of the menu item. */
+const unpublishDisabledReason = computed(() => {
+	if (!activeVersion.value) return i18n.baseText('workflows.unpublish.notPublished');
+	if (collaborationReadOnly.value) {
+		return collaborationStore.isCurrentUserWriter
+			? i18n.baseText('workflows.unpublish.readOnlyAnotherTab')
+			: i18n.baseText('workflows.unpublish.readOnly');
+	}
+	if (!hasUnpublishPermission.value) return i18n.baseText('workflows.unpublish.permissionDenied');
+
+	return '';
+});
+
 const versionMenuActions = computed<Array<ActionDropdownItem<VERSION_ACTIONS>>>(() => {
 	const actions: Array<ActionDropdownItem<VERSION_ACTIONS>> = [
 		{
@@ -688,6 +765,7 @@ const versionMenuActions = computed<Array<ActionDropdownItem<VERSION_ACTIONS>>>(
 				: i18n.baseText('workflows.publish'),
 			shortcut: { shiftKey: true, keys: ['P'] },
 			disabled: shouldDisablePublishButton.value,
+			tooltip: publishDisabledReason.value || undefined,
 		},
 	];
 
@@ -709,7 +787,8 @@ const versionMenuActions = computed<Array<ActionDropdownItem<VERSION_ACTIONS>>>(
 	actions.push({
 		id: VERSION_ACTIONS.UNPUBLISH,
 		label: i18n.baseText('workflows.unpublish'),
-		disabled: !activeVersion.value || collaborationReadOnly.value || !hasUnpublishPermission.value,
+		disabled: unpublishDisabledReason.value !== '',
+		tooltip: unpublishDisabledReason.value || undefined,
 		divided: true,
 		shortcut: { metaKey: true, keys: ['U'] },
 	});
@@ -804,7 +883,7 @@ const onUnpublish = () => {
 		name: WORKFLOW_HISTORY_VERSION_UNPUBLISH,
 		data: {
 			workflowId: props.id,
-			versionName: activeVersion.value.name,
+			workflowName: workflowDocumentStore.value.name,
 			eventBus: unpublishEventBus,
 		},
 	});
@@ -898,7 +977,21 @@ onBeforeUnmount(() => {
 					<template #content>
 						<div>
 							<template v-if="publishButtonConfig.tooltip">
-								<span :class="$style.tooltipReason">{{ publishButtonConfig.tooltip }}</span> <br />
+								<span :class="$style.tooltipReason">{{ publishButtonConfig.tooltip }}</span>
+								<template v-if="showEngineV2FindingsLink">
+									{{ ' ' }}
+									<!-- A button, not a link: it opens a dialog, and it keeps the tooltip's text color. -->
+									<button
+										type="button"
+										:class="$style.tooltipAction"
+										data-test-id="engine-v2-publish-blocked-link"
+										data-attr="engine-v2-publish-blocked-link"
+										@click="openEngineV2Findings(props.id)"
+									>
+										{{ i18n.baseText('engineV2Compatibility.publishBlocked.link') }}
+									</button>
+								</template>
+								<br />
 							</template>
 							<template v-if="activeVersion && publishButtonConfig.showVersionInfo">
 								<span data-test-id="workflow-active-version-info">{{ activeVersionName }}</span
@@ -916,7 +1009,7 @@ onBeforeUnmount(() => {
 					</template>
 					<N8nButton
 						:class="$style.groupButtonLeft"
-						:loading="autoSaveForPublish"
+						:loading="autoSaveForPublish || isCheckingReviewStatus"
 						:disabled="!publishButtonConfig.enabled || shouldDisablePublishButton"
 						:focusable-when-disabled="!!publishButtonConfig.tooltip && !publishButtonConfig.loading"
 						variant="ghost"
@@ -969,10 +1062,7 @@ onBeforeUnmount(() => {
 						/>
 					</template>
 					<template v-if="showWorkflowReviewControls" #footer>
-						<WorkflowReviewRequiredToggle
-							:workflow-id="props.id"
-							:locked-by-instance="isApprovalAlwaysRequired"
-						/>
+						<WorkflowReviewRequiredToggle :workflow-id="props.id" :locked-by="approvalRequiredBy" />
 					</template>
 				</N8nActionDropdown>
 			</div>
@@ -1014,6 +1104,24 @@ onBeforeUnmount(() => {
 /* A restricted node list puts one scope on each line. */
 .tooltipReason {
 	white-space: pre-line;
+}
+
+// Text on the dark tooltip: the inherited color keeps the contrast of the reason text.
+.tooltipAction {
+	padding: 0;
+	border: none;
+	background: none;
+	color: inherit;
+	font: inherit;
+	font-weight: var(--font-weight--bold);
+	text-decoration: underline;
+	cursor: pointer;
+
+	// The shared focus color is dark, so it would not show on the dark tooltip.
+	&:focus-visible {
+		outline: var(--focus--border-width) solid currentColor;
+		outline-offset: var(--spacing--5xs);
+	}
 }
 
 .activeVersionIndicator {

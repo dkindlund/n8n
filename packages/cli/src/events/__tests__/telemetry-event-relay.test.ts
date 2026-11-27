@@ -1011,7 +1011,38 @@ describe('TelemetryEventRelay', () => {
 					shadow_warning_count: 2,
 					not_loaded_warning_count: 1,
 					version: 1,
+					origin: 'save',
 				},
+			);
+		});
+
+		it('should track the create of an empty project policy with its origin', () => {
+			eventService.emit('node-type-policy-saved', {
+				updatedBy: 'user123',
+				kind: 'credential-types',
+				projectId: 'project-1',
+				scopeId: 'scope-1',
+				before: null,
+				after: { defaultAction: 'allow', version: 1 },
+				rulesBefore: null,
+				rulesAfter: [],
+				shadowWarningCount: 0,
+				notLoadedWarningCount: 0,
+				origin: 'add-project-policy',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.TYPE_AVAILABILITY_POLICIES.USER_SAVED_TYPE_AVAILABILITY_POLICY,
+				expect.objectContaining({
+					kind: 'credential-types',
+					scope: 'project',
+					project_id: 'project-1',
+					default_action: 'allow',
+					is_first_write: true,
+					rule_count: 0,
+					blocked_type_count: 0,
+					origin: 'add-project-policy',
+				}),
 			);
 		});
 
@@ -2236,6 +2267,11 @@ describe('TelemetryEventRelay', () => {
 				descriptionLength: 0,
 				publicApi: 'n8n_node',
 				expected: { public_api: true, public_api_client: 'n8n_node' },
+			},
+			{
+				descriptionLength: 0,
+				publicApi: 'n8n_cli',
+				expected: { public_api: true, public_api_client: 'n8n_cli' },
 			},
 			{
 				descriptionLength: 18,
@@ -6527,6 +6563,29 @@ describe('TelemetryEventRelay', () => {
 			).toBeNull();
 		});
 
+		it('should track a review a user closed with the closer and the reviewed version', () => {
+			eventService.emit('workflow-review-closed-by-user', {
+				user: { id: 'user123' },
+				workflowReviewRequestId: 'review-1',
+				workflowId: 'wf-1',
+				workflowVersionId: 'ver-1',
+			});
+
+			const payload = {
+				user_id: 'user123',
+				workflow_review_request_id: 'review-1',
+				workflow_id: 'wf-1',
+				workflow_version_id: 'ver-1',
+			};
+			expect(telemetry.track).toHaveBeenCalledWith(
+				TELEMETRY_EVENT.WORKFLOW_REVIEWS.USER_CLOSED_WORKFLOW_REVIEW,
+				payload,
+			);
+			expect(
+				TELEMETRY_EVENT.WORKFLOW_REVIEWS.USER_CLOSED_WORKFLOW_REVIEW.getValidationError(payload),
+			).toBeNull();
+		});
+
 		it('should track a comment on a review, never its body', () => {
 			eventService.emit('workflow-review-comment-created', {
 				user: { id: 'user123' },
@@ -6893,6 +6952,8 @@ describe('TelemetryEventRelay', () => {
 					projectId: 'project-1',
 					versionId: 'v-2',
 					userId: 'user-1',
+					threadId: 'thread-1',
+					source: 'assistant',
 					workflowCount: 1,
 					dataTableCount: 2,
 					agentCount: 0,
@@ -6905,6 +6966,8 @@ describe('TelemetryEventRelay', () => {
 					project_id: 'project-1',
 					version_id: 'v-2',
 					user_id: 'user-1',
+					thread_id: 'thread-1',
+					source: 'assistant',
 					workflow_count: 1,
 					data_table_count: 2,
 					agent_count: 0,
@@ -6934,6 +6997,94 @@ describe('TelemetryEventRelay', () => {
 			appEventService.emit(eventName, payload);
 
 			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(entry, properties);
+		});
+	});
+
+	describe('custom MCP server events', () => {
+		// The init tests register a second relay on the shared emitter, so this block uses its own.
+		const mcpEventService = new EventService();
+
+		beforeAll(async () => {
+			await new TelemetryEventRelay(
+				mcpEventService,
+				telemetry,
+				license,
+				licenseState,
+				globalConfig,
+				instanceSettings,
+				binaryDataConfig,
+				workflowRepository,
+				nodeTypes,
+				sharedWorkflowRepository,
+				projectRelationRepository,
+				credentialsRepository,
+				dynamicCredentialsProxy,
+				dbConnection,
+				loadNodesAndCredentials,
+				postHogClient,
+				ownershipService,
+			).init();
+		});
+
+		it.each([
+			['mcp-server-created', TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_CREATED_CUSTOM_MCP_SERVER],
+			['mcp-server-deleted', TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_DELETED_CUSTOM_MCP_SERVER],
+		] as const)('should track on `%s` event with the user and the source', (eventName, entry) => {
+			mcpEventService.emit(eventName, {
+				serverId: 'server-1',
+				projectId: 'p-1',
+				userId: 'user-1',
+				source: 'ui',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(entry, {
+				server_id: 'server-1',
+				project_id: 'p-1',
+				user_id: 'user-1',
+				source: 'ui',
+				thread_id: undefined,
+			});
+		});
+
+		it('tracks a tool that a builder added, with the user id and the source', () => {
+			mcpEventService.emit('mcp-server-tool-added', {
+				serverId: 'server-1',
+				userId: 'user-1',
+				source: 'ui',
+				toolKind: 'workflow',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(
+				TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_ADDED_TOOL_TO_CUSTOM_MCP_SERVER,
+				{
+					server_id: 'server-1',
+					user_id: 'user-1',
+					source: 'ui',
+					tool_kind: 'workflow',
+				},
+			);
+		});
+
+		it('tracks a tool draft, with the field and the status', () => {
+			mcpEventService.emit('mcp-server-tool-drafted', {
+				serverId: 'server-1',
+				userId: 'user-1',
+				source: 'ui',
+				field: 'both',
+				status: 'invalid_answer',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(
+				TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_DRAFTED_TOOL_OF_CUSTOM_MCP_SERVER,
+				{
+					server_id: 'server-1',
+					user_id: 'user-1',
+					source: 'ui',
+					thread_id: undefined,
+					field: 'both',
+					status: 'invalid_answer',
+				},
+			);
 		});
 	});
 });

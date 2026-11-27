@@ -27,7 +27,7 @@ import {
 	type WorkflowRepository,
 	type WorkflowPublishedVersionRepository,
 } from '@n8n/db';
-import { In } from '@n8n/typeorm';
+import { In, QueryFailedError } from '@n8n/typeorm';
 import type { EntityManager } from '@n8n/typeorm';
 import * as fastGlob from 'fast-glob';
 import { type InstanceSettings } from 'n8n-core';
@@ -163,6 +163,7 @@ describe('SourceControlImportService', () => {
 
 	beforeEach(() => {
 		vi.clearAllMocks();
+		sharedWorkflowRepository.syncImportedWorkflowOwner.mockResolvedValue(false);
 		workflowPublishGuard.assertCanPublish.mockResolvedValue(undefined);
 		// Default: nothing is published, so pull deletions never wait on an unpublish.
 		workflowPublishedVersionRepository.getPublishedVersionId.mockResolvedValue(null);
@@ -360,7 +361,6 @@ describe('SourceControlImportService', () => {
 
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('1');
 
 			fsReadFile
@@ -436,7 +436,6 @@ describe('SourceControlImportService', () => {
 
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('1');
 			fsReadFile.mockResolvedValue(JSON.stringify(legacyWorkflowData));
 
@@ -465,7 +464,6 @@ describe('SourceControlImportService', () => {
 			);
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 
 			// Mock invalid JSON that will cause parsing to fail
 			fsReadFile.mockResolvedValue('{ invalid json');
@@ -520,7 +518,6 @@ describe('SourceControlImportService', () => {
 			);
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue(mockWorkflowData.id);
 
 			fsReadFile.mockResolvedValueOnce(JSON.stringify(mockWorkflowData));
@@ -563,7 +560,6 @@ describe('SourceControlImportService', () => {
 			);
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('workflow2');
 
 			fsReadFile
@@ -606,7 +602,6 @@ describe('SourceControlImportService', () => {
 			);
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('wf');
 			userRepository.findOne.mockResolvedValue(Object.assign(new Person(), { id: 'user1' }));
 
@@ -639,7 +634,6 @@ describe('SourceControlImportService', () => {
 			);
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('wf1');
 			fsReadFile.mockResolvedValue(
 				JSON.stringify({
@@ -680,7 +674,6 @@ describe('SourceControlImportService', () => {
 			);
 			workflowRepository.findByIds.mockResolvedValue([]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 
 			fsReadFile.mockResolvedValue(JSON.stringify(mockWorkflowData));
@@ -728,7 +721,6 @@ describe('SourceControlImportService', () => {
 				}),
 			]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 			userRepository.findOne.mockResolvedValue(
 				Object.assign(new Person(), { id: mockUserId, firstName: 'Test', lastName: 'User' }),
@@ -780,7 +772,6 @@ describe('SourceControlImportService', () => {
 				}),
 			]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 
 			fsReadFile.mockResolvedValue(JSON.stringify(mockWorkflowData));
@@ -827,7 +818,6 @@ describe('SourceControlImportService', () => {
 				}),
 			]);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 
 			fsReadFile.mockResolvedValue(JSON.stringify(mockWorkflowData));
@@ -875,7 +865,6 @@ describe('SourceControlImportService', () => {
 			]);
 			userRepository.findOne.mockResolvedValue(mockPerson);
 			folderRepository.find.mockResolvedValue([]);
-			sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 			workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 
 			fsReadFile.mockResolvedValue(JSON.stringify(mockWorkflowData));
@@ -894,7 +883,7 @@ describe('SourceControlImportService', () => {
 			expect(workflowService.activateWorkflowFromSourceControlPull).not.toHaveBeenCalled();
 		});
 
-		describe('workflow mutation hooks on pull-archive', () => {
+		describe('workflow mutation hooks on pull', () => {
 			const mockUserId = 'user-id-123';
 			const mockPerson = Object.assign(new Person(), { id: mockUserId });
 			const mockWorkflowFile = '/mock/workflow1.json';
@@ -932,7 +921,6 @@ describe('SourceControlImportService', () => {
 						: [],
 				);
 				folderRepository.find.mockResolvedValue([]);
-				sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 				workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 				fsReadFile.mockResolvedValue(JSON.stringify(remoteWorkflow(options.remote)));
 
@@ -1012,6 +1000,33 @@ describe('SourceControlImportService', () => {
 
 				expect(workflowMutationHooks.afterWorkflowArchived).toHaveBeenCalledWith('workflow1', null);
 			});
+
+			it('fires the transfer hook after the owner update completes', async () => {
+				const candidates = setupPull({ existing: {} });
+				sharedWorkflowRepository.syncImportedWorkflowOwner.mockImplementationOnce(async () => {
+					expect(workflowMutationHooks.afterWorkflowsTransferred).not.toHaveBeenCalled();
+					return true;
+				});
+
+				await service.importWorkflowFromWorkFolder(candidates, mockUserId);
+
+				expect(sharedWorkflowRepository.syncImportedWorkflowOwner).toHaveBeenCalledWith(
+					'workflow1',
+					'project1',
+				);
+				expect(workflowMutationHooks.afterWorkflowsTransferred).toHaveBeenCalledExactlyOnceWith(
+					['workflow1'],
+					null,
+				);
+			});
+
+			it('does not fire the transfer hook when the owner did not change', async () => {
+				const candidates = setupPull({ existing: {} });
+
+				await service.importWorkflowFromWorkFolder(candidates, mockUserId);
+
+				expect(workflowMutationHooks.afterWorkflowsTransferred).not.toHaveBeenCalled();
+			});
 		});
 
 		describe('autoPublish parameter', () => {
@@ -1023,7 +1038,6 @@ describe('SourceControlImportService', () => {
 					Object.assign(new Project(), { id: 'project1', type: 'personal' }),
 				);
 				folderRepository.find.mockResolvedValue([]);
-				sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 				workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 				userRepository.findOne.mockResolvedValue(mockPerson);
 			});
@@ -1469,7 +1483,6 @@ describe('SourceControlImportService', () => {
 				workflowRepository.findByIds.mockResolvedValue([]);
 				userRepository.findOne.mockResolvedValue(mockPerson);
 				folderRepository.find.mockResolvedValue([]);
-				sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 				workflowRepository.upsertImportedContent.mockResolvedValue('workflow1');
 				workflowService.activateWorkflowFromSourceControlPull.mockRejectedValue(
 					new Error('Activation failed'),
@@ -1614,7 +1627,6 @@ describe('SourceControlImportService', () => {
 					}),
 				);
 				folderRepository.find.mockResolvedValue([]);
-				sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 				workflowRepository.upsertImportedContent.mockResolvedValue('1');
 			});
 
@@ -1718,7 +1730,6 @@ describe('SourceControlImportService', () => {
 					}),
 				);
 				folderRepository.find.mockResolvedValue([]);
-				sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 				workflowRepository.upsertImportedContent.mockResolvedValue('1');
 			});
 
@@ -1797,7 +1808,6 @@ describe('SourceControlImportService', () => {
 				);
 				workflowRepository.findByIds.mockResolvedValue([]);
 				folderRepository.find.mockResolvedValue([]);
-				sharedWorkflowRepository.findWithFields.mockResolvedValue([]);
 				workflowRepository.upsertImportedContent.mockResolvedValue('1');
 				fsReadFile.mockResolvedValueOnce(JSON.stringify(mockWorkflowData));
 			});
@@ -1937,6 +1947,24 @@ describe('SourceControlImportService', () => {
 					type: 'oauth2',
 				}),
 			);
+		});
+
+		it('should skip credential files with invalid JSON', async () => {
+			globMock.mockResolvedValue(['/mock/credential_good.json', '/mock/credential_bad.json']);
+			fsReadFile.mockImplementation(async (file: string) =>
+				file.includes('bad')
+					? '{"apiKey": super-secret-value}'
+					: JSON.stringify({ id: 'cred1', name: 'Good', type: 'oauth2' }),
+			);
+
+			const result = await service.getRemoteCredentialsFromFiles(globalAdminContext);
+
+			expect(result).toHaveLength(1);
+			expect(result[0]).toEqual(expect.objectContaining({ id: 'cred1' }));
+			expect(mockLogger.warn).toHaveBeenCalledWith(
+				'Failed to parse credential from file /mock/credential_bad.json: invalid JSON format',
+			);
+			expect(JSON.stringify(mockLogger.warn.mock.calls)).not.toContain('super-secr');
 		});
 
 		it('should skip credentials that are instance credentials locally, for any caller', async () => {
@@ -2217,6 +2245,53 @@ describe('SourceControlImportService', () => {
 				}),
 				['id'],
 			);
+		});
+
+		it('skips a credential candidate with invalid JSON instead of failing the pull', async () => {
+			const candidates: SourceControlledFile[] = [
+				{
+					file: '/mock/credential_stubs/cred1.json',
+					id: 'cred1',
+					name: 'Good Credential',
+					type: 'credential',
+					status: 'created',
+					location: 'local',
+					conflict: false,
+					updatedAt: '',
+				},
+				{
+					file: '/mock/credential_stubs/cred2.json',
+					id: 'cred2',
+					name: 'Broken Credential',
+					type: 'credential',
+					status: 'created',
+					location: 'local',
+					conflict: false,
+					updatedAt: '',
+				},
+			];
+
+			fsReadFile
+				.mockResolvedValueOnce(
+					JSON.stringify({ id: 'cred1', name: 'Good Credential', type: 'oauth2Api', data: {} }),
+				)
+				.mockResolvedValueOnce('{"apiKey": super-secret-value}');
+			credentialsRepository.find.mockResolvedValue([]);
+			sharedCredentialsRepository.find.mockResolvedValue([]);
+			credentialsRepository.upsert.mockResolvedValue({
+				identifiers: [],
+				generatedMaps: [],
+				raw: [],
+			});
+
+			const result = await service.importCredentialsFromWorkFolder(candidates, mockUserId);
+
+			expect(result).toHaveLength(1);
+			expect(result[0]).toEqual({ id: 'cred1', name: 'Good Credential', type: 'oauth2Api' });
+			expect(mockLogger.warn).toHaveBeenCalledWith(
+				'Failed to parse credential from file /mock/credential_stubs/cred2.json: invalid JSON format',
+			);
+			expect(JSON.stringify(mockLogger.warn.mock.calls)).not.toContain('super-secr');
 		});
 
 		it('should skip credential files flagged as instance credentials', async () => {
@@ -2801,7 +2876,6 @@ describe('SourceControlImportService', () => {
 			// Assert
 			expect(result).toHaveLength(1);
 			expect(credentialsRepository.upsert).toHaveBeenCalled();
-			// Ownership sync should be handled by syncResourceOwnership
 		});
 
 		it('should sanitize credential data and exclude oauthTokenData', async () => {
@@ -3210,6 +3284,28 @@ describe('SourceControlImportService', () => {
 			expect(credential.contentImportPolicy).toEqual({ violations: [], checkErrors });
 		});
 
+		it('skips a credential file with invalid JSON instead of failing the preview', async () => {
+			fsReadFile.mockImplementation(async (path) =>
+				path === '/mock/cred-bad.json'
+					? '{"apiKey": super-secret-value}'
+					: JSON.stringify({ id: 'cred1', type: 'slackApi', ownedBy: null }),
+			);
+
+			await service.previewContentImportPolicy(
+				[
+					file({ file: '/mock/cred-good.json', id: 'cred1', type: 'credential' }),
+					file({ file: '/mock/cred-bad.json', id: 'cred2', type: 'credential' }),
+				],
+				userId,
+			);
+
+			expect(policyEnforcementService.evaluateContentImport).toHaveBeenCalledTimes(1);
+			expect(mockLogger.warn).toHaveBeenCalledWith(
+				'Failed to parse credential from file /mock/cred-bad.json: invalid JSON format',
+			);
+			expect(JSON.stringify(mockLogger.warn.mock.calls)).not.toContain('super-secr');
+		});
+
 		it('resolves each owner once', async () => {
 			const owner = { type: 'team', teamId: 'team-1', teamName: 'Team 1' };
 			projectRepository.findOne.mockResolvedValue(
@@ -3251,6 +3347,34 @@ describe('SourceControlImportService', () => {
 			const result = await service.getRemoteVariablesFromFile();
 
 			expect(result).toHaveLength(0);
+		});
+	});
+
+	describe('importVariablesFromWorkFolder', () => {
+		it('keeps the local value when adopting a same-key variable with a different id', async () => {
+			// The local instance created VAR1 independently (id local1, real value set);
+			// Git tracks it under the upstream id remote1 with the sync placeholder value ''.
+			variablesRepository.find.mockResolvedValue([mock<Variables>({ id: 'local1', key: 'VAR1' })]);
+			variablesRepository.upsert.mockRejectedValueOnce(
+				new QueryFailedError(
+					'insert',
+					[],
+					Object.assign(new Error('duplicate key'), { code: '23505' }),
+				),
+			);
+			fsReadFile.mockResolvedValue(
+				JSON.stringify([{ id: 'remote1', key: 'VAR1', value: '', type: 'string' }]),
+			);
+
+			await service.importVariablesFromWorkFolder(
+				mock<SourceControlledFile>({ file: '/mock/n8n/git/variable_stubs.json' }),
+			);
+
+			const updateCall = variablesRepository.update.mock.calls.at(-1);
+			expect(updateCall?.[0]).toEqual({ key: 'VAR1' });
+			expect(updateCall?.[1]).toMatchObject({ id: 'remote1' });
+			// The remote '' is the sync placeholder for an instance-local value: keep the local one.
+			expect(updateCall?.[1]?.value).toBeUndefined();
 		});
 	});
 
@@ -3882,6 +4006,130 @@ describe('SourceControlImportService', () => {
 				]);
 			});
 
+			it.each([
+				['target', ['project2', 'project1']],
+				['source', ['project1', 'project2']],
+			])(
+				'keeps a variable moved between projects when the %s project file comes first',
+				async (_, fileOrder) => {
+					const variableProjects = new Map<string, string>([['var1', 'project1']]);
+					variablesRepository.upsert.mockImplementation(async (row: unknown) => {
+						const { id, project } = row as { id: string; project?: { id: string } | null };
+						if (project) variableProjects.set(id, project.id);
+						return { identifiers: [], generatedMaps: [], raw: [] };
+					});
+					variablesRepository.find.mockImplementation(async (options?: unknown) => {
+						const projectId = (options as { where?: { project?: { id?: string } } } | undefined)
+							?.where?.project?.id;
+						return [...variableProjects]
+							.filter(([, pid]) => projectId === undefined || pid === projectId)
+							.map(([id]) => mock<Variables>({ id }));
+					});
+					variableService.deleteByIds.mockImplementation(async (ids: string[]) => {
+						ids.forEach((id) => variableProjects.delete(id));
+					});
+
+					const projectFiles: Record<string, object> = {
+						project1: {
+							id: 'project1',
+							name: 'Team Project 1',
+							type: 'team',
+							owner: { type: 'team', teamId: 'project1' },
+						},
+						project2: {
+							id: 'project2',
+							name: 'Team Project 2',
+							type: 'team',
+							owner: { type: 'team', teamId: 'project2' },
+							variableStubs: [{ id: 'var1', key: 'VAR1', value: '', type: 'string' }],
+						},
+					};
+					const candidates = fileOrder.map((id) =>
+						mock<SourceControlledFile>({ file: `/mock/team-${id}.json`, id }),
+					);
+					fileOrder.forEach((id) =>
+						fsReadFile.mockResolvedValueOnce(JSON.stringify(projectFiles[id])),
+					);
+					projectRepository.findOne.mockResolvedValue(null);
+					projectRelationRepository.findOne.mockResolvedValue(null);
+
+					await service.importTeamProjectsFromWorkFolder(candidates, mockPullingUserId);
+
+					for (const [ids] of variableService.deleteByIds.mock.calls) {
+						expect(ids).not.toContain('var1');
+					}
+					expect(variableProjects.get('var1')).toBe('project2');
+					const var1Upserts = variablesRepository.upsert.mock.calls.filter(
+						(call) => (call[0] as { id?: string }).id === 'var1',
+					);
+					expect(var1Upserts).toHaveLength(1);
+					expect((var1Upserts[0][0] as { value?: string }).value).toBeUndefined();
+				},
+			);
+
+			it('keeps pruning the remaining projects when one project prune fails', async () => {
+				// Both projects import fine; project1's prune blows up (find rejects). The
+				// failure must not escape the function and must not skip project2's prune.
+				variablesRepository.find.mockImplementation(async (options?: unknown) => {
+					const projectId = (options as { where?: { project?: { id?: string } } } | undefined)
+						?.where?.project?.id;
+					if (projectId === 'project1') {
+						throw new Error('prune find blew up');
+					}
+					if (projectId === 'project2') {
+						return [
+							mock<Variables>({
+								id: 'stale2',
+								key: 'STALE2',
+								project: mock<Project>({ id: 'project2' }),
+							}),
+						];
+					}
+					// importVariables' {select:['id']} probe: no variables exist.
+					return [];
+				});
+
+				const projectData1 = {
+					id: 'project1',
+					name: 'Team Project 1',
+					type: 'team',
+					owner: { type: 'team', teamId: 'project1' },
+				};
+				const projectData2 = {
+					id: 'project2',
+					name: 'Team Project 2',
+					type: 'team',
+					owner: { type: 'team', teamId: 'project2' },
+				};
+				const candidates = [
+					mock<SourceControlledFile>({ file: '/mock/team-project1.json', id: 'project1' }),
+					mock<SourceControlledFile>({ file: '/mock/team-project2.json', id: 'project2' }),
+				];
+				fsReadFile
+					.mockResolvedValueOnce(JSON.stringify(projectData1))
+					.mockResolvedValueOnce(JSON.stringify(projectData2));
+				projectRepository.findOne.mockResolvedValue(null);
+				projectRelationRepository.findOne.mockResolvedValue(null);
+
+				const result = await service.importTeamProjectsFromWorkFolder(
+					candidates,
+					mockPullingUserId,
+				);
+
+				// The pull completed normally: both imports are reported.
+				expect(result).toEqual([
+					{ id: 'project1', name: 'Team Project 1' },
+					{ id: 'project2', name: 'Team Project 2' },
+				]);
+				// project2's prune still ran despite project1's failure...
+				expect(variableService.deleteByIds).toHaveBeenCalledWith(['stale2']);
+				// ...and project1's failure was logged, not thrown.
+				expect(mockLogger.error).toHaveBeenCalledWith(
+					expect.stringContaining('prune variables of project project1'),
+					expect.anything(),
+				);
+			});
+
 			it('should NOT assign pulling user as project admin for existing projects with an admin', async () => {
 				// Arrange
 				const mockProjectFile = '/mock/team-project.json';
@@ -4065,7 +4313,7 @@ describe('SourceControlImportService', () => {
 
 				fsReadFile.mockResolvedValueOnce(JSON.stringify(mockProjectData));
 
-				variableService.getAllCached.mockResolvedValue([
+				variablesRepository.find.mockResolvedValue([
 					{
 						id: 'var2',
 						key: 'VAR2',
@@ -4111,6 +4359,22 @@ describe('SourceControlImportService', () => {
 				},
 				variableStubs: [{ id: 'var1', key: 'VAR1', value: 'value1', type: 'string' }],
 			};
+
+			it('should skip project files with invalid JSON', async () => {
+				// ARRANGE
+				globMock.mockResolvedValue(['project_good.json', 'project_bad.json']);
+				fsReadFile
+					.mockResolvedValueOnce(JSON.stringify(mockProjectData1))
+					.mockResolvedValueOnce('not json');
+
+				// ACT
+				const result = await service.getRemoteProjectsFromFiles(globalAdminContext);
+
+				// ASSERT
+				expect(result).toHaveLength(1);
+				expect(result[0].id).toBe(mockProjectData1.id);
+				expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('project_bad.json'));
+			});
 
 			it('should return all projects if the user has access to all projects', async () => {
 				// ARRANGE

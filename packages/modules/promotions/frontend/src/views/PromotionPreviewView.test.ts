@@ -315,12 +315,12 @@ describe('PromotionPreviewView', () => {
 
 	it('should keep the selection while the user inspects cards', async () => {
 		const { getAllByTestId, getByTestId } = await render();
-		expect(getByTestId('promotion-preview-counts')).toHaveTextContent('5 of 5');
+		expect(getByTestId('promotion-preview-submit')).toHaveTextContent(/\b5\b/);
 
 		await userEvent.click(treeRow(getAllByTestId, 'workflow:w1').getByRole('checkbox'));
 		await userEvent.click(treeRow(getAllByTestId, 'dataTable:t1').getByText('Invoices'));
 
-		expect(getByTestId('promotion-preview-counts')).toHaveTextContent('4 of 5');
+		expect(getByTestId('promotion-preview-submit')).toHaveTextContent(/\b4\b/);
 		// The tab shows the total, whatever the selection.
 		expect(getByTestId('promotion-preview-tabs')).toHaveTextContent(/Changes\s*5/);
 		expect(treeRow(getAllByTestId, 'workflow:w1').getByRole('checkbox')).not.toBeChecked();
@@ -349,25 +349,26 @@ describe('PromotionPreviewView', () => {
 		const { getAllByTestId, getByTestId } = await render();
 		const cardCheckbox = (key: string) =>
 			card(getAllByTestId, key).getByTestId('promotion-preview-card-checkbox');
-		expect(getByTestId('promotion-preview-counts')).toHaveTextContent('3 of 3');
+		expect(getByTestId('promotion-preview-submit')).toHaveTextContent(/\b3\b/);
 
 		// The folder card clears the workflows inside the folder, and the card stays open.
 		await userEvent.click(cardCheckbox('folder:f1'));
 		expect(cardToggle(getAllByTestId, 'folder:f1')).toHaveAttribute('aria-expanded', 'true');
 		expect(treeRow(getAllByTestId, 'workflow:w1').getByRole('checkbox')).not.toBeChecked();
 		expect(cardCheckbox('workflow:w2')).not.toBeChecked();
-		expect(getByTestId('promotion-preview-counts')).toHaveTextContent('1 of 3');
+		expect(getByTestId('promotion-preview-submit')).toHaveTextContent(/\b1\b/);
 
 		await userEvent.click(treeRow(getAllByTestId, 'workflow:w1').getByRole('checkbox'));
 		expect(cardCheckbox('workflow:w1')).toBeChecked();
 		expect(cardCheckbox('folder:f1')).toHaveAttribute('data-state', 'indeterminate');
 		expect(cardCheckbox('workflow:w2')).not.toBeChecked();
-		expect(getByTestId('promotion-preview-counts')).toHaveTextContent('3 of 3');
+		expect(getByTestId('promotion-preview-submit')).toHaveTextContent(/\b3\b/);
 
 		await promote(getByTestId);
 		expect(api.promoteProjectSelection).toHaveBeenCalledWith(expect.anything(), 'p1', {
 			workflowIds: ['w1', 'w3'],
 			folderIds: [],
+			credentialIds: [],
 			expectedPreviewRevision: REVISION,
 		});
 	});
@@ -552,6 +553,19 @@ describe('PromotionPreviewView', () => {
 		},
 	);
 
+	it.each(['promote', 'apply'] as const)(
+		'puts Refresh and the submit button in the title row for %s',
+		async (direction) => {
+			const { getByTestId } = await render(`/projects/p1/promotions/${direction}`, direction);
+
+			const titleRow = within(getByTestId('promotion-preview-title-row'));
+			expect(titleRow.getByRole('heading', { level: 1 })).toBeInTheDocument();
+			expect(titleRow.getByTestId('promotion-preview-refresh')).toBeInTheDocument();
+			expect(titleRow.getByTestId('promotion-preview-submit')).toBeInTheDocument();
+			expect(within(getByTestId('promotion-preview-tabs')).queryByRole('button')).toBeNull();
+		},
+	);
+
 	it('should keep the changes and warn when a refresh fails', async () => {
 		const { getByTestId, getByText } = await render();
 		vi.mocked(api.getPromotionPreview).mockRejectedValueOnce(new Error('offline'));
@@ -643,6 +657,7 @@ describe('PromotionPreviewView', () => {
 		expect(api.promoteProjectSelection).toHaveBeenCalledWith(expect.anything(), 'p1', {
 			workflowIds: ['w1', 'w2', 'w3', 'w4'],
 			folderIds: [],
+			credentialIds: [],
 			expectedPreviewRevision: REVISION,
 		});
 		expect(showMessage).toHaveBeenCalledWith({
@@ -680,6 +695,7 @@ describe('PromotionPreviewView', () => {
 		expect(api.promoteProjectSelection).toHaveBeenCalledWith(expect.anything(), 'p1', {
 			workflowIds: ['w1', 'w3', 'w4'],
 			folderIds: [],
+			credentialIds: [],
 			expectedPreviewRevision: REVISION,
 		});
 	});
@@ -695,6 +711,7 @@ describe('PromotionPreviewView', () => {
 		expect(api.promoteProjectSelection).toHaveBeenCalledWith(expect.anything(), 'p1', {
 			workflowIds: ['w1', 'w2', 'w3', 'w4'],
 			folderIds: [],
+			credentialIds: [],
 			commitMessage: 'Route leads by region',
 			expectedPreviewRevision: REVISION,
 		});
@@ -728,6 +745,7 @@ describe('PromotionPreviewView', () => {
 		expect(api.promoteProjectSelection).toHaveBeenCalledWith(expect.anything(), 'p1', {
 			workflowIds: ['w1'],
 			folderIds: [],
+			credentialIds: [],
 			commitMessage: 'Route leads by region',
 			expectedPreviewRevision: REVISION,
 		});
@@ -967,6 +985,7 @@ describe('PromotionPreviewView', () => {
 		expect(api.promoteProjectSelection).toHaveBeenLastCalledWith(expect.anything(), 'p1', {
 			workflowIds: ['w1', 'w2', 'w3', 'w4'],
 			folderIds: [],
+			credentialIds: [],
 			commitMessage: 'Route leads by region',
 			expectedPreviewRevision: newRevision,
 		});

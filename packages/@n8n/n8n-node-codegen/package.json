@@ -15,7 +15,9 @@
     "test:unit": "pnpm bundle-spec && vitest run"
   },
   "dependencies": {
+    "@n8n/utils": "workspace:*",
     "pluralize": "catalog:",
+    "title-case": "catalog:",
     "yaml": "catalog:"
   },
   "devDependencies": {

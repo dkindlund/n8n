@@ -1,5 +1,4 @@
 import {
-	INSTANCE_ACTIVITY_CONTEXT_FLAG,
 	CREDENTIAL_DESCRIPTIONS_FLAG,
 	MCP_AGENT_SCOPES,
 	MCP_SKILL_SCOPES,
@@ -13,13 +12,13 @@ import { Container, Service } from '@n8n/di';
 
 import type { ProtectedResource, ResourcePrincipal, ResourceUser } from '@n8n/inbound-auth';
 import { UrlService, PostHogClient } from '@n8n/backend-services';
-import { SkillsGate } from '@/modules/skills';
+import { SkillsGate, SkillSyncFlagGate } from '@/modules/skills';
 
 import {
 	ACTIVITY_LOG_TOOLS,
 	BUILDER_TOOLS,
 	FOLDER_FEATURE_TOOLS,
-	INSTANCE_CONTEXT_TOOLS,
+	SKILL_SOURCE_TOOLS,
 	TOOLS_BY_SCOPE,
 } from './mcp-scopes';
 import {
@@ -106,21 +105,17 @@ export class McpProtectedResource implements ProtectedResource {
 		const tagsDisabled = this.globalConfig.tags.disabled;
 		const foldersLicensed = this.licenseState.isFoldersLicensed();
 		const supportedScopes = new Set(this.scopes);
-		// Consent and tool registration use the same instance activity gate.
-		const instanceContextAvailable = this.moduleRegistry.isActive('instance-ai');
-		let instanceContextEnabled = false;
-		try {
-			instanceContextEnabled =
-				(await this.postHogClient.getFeatureFlagForInstance(INSTANCE_ACTIVITY_CONTEXT_FLAG)) ===
-				true;
-		} catch {
-			// Keep context tools hidden when the gate cannot be read.
-		}
+		const instanceContextAvailable =
+			this.moduleRegistry.isActive('instance-ai') && this.globalConfig.activityLog.enabled;
 
 		const credentialDescriptionsEnabled =
 			(await this.postHogClient
 				.getFeatureFlagForInstance(CREDENTIAL_DESCRIPTIONS_FLAG)
 				.catch(() => false)) === true;
+
+		// Consent has no user, so it reads only the instance part of the Skill Sync gate. A user
+		// without the Skill Sync flag still sees the source tools here and gets none of them.
+		const skillSourcesAvailable = Container.get(SkillSyncFlagGate).isAvailable;
 
 		return Object.fromEntries(
 			Object.entries(TOOLS_BY_SCOPE)
@@ -133,7 +128,7 @@ export class McpProtectedResource implements ProtectedResource {
 							(!tagsDisabled || tool !== 'list_workflow_tags') &&
 							(foldersLicensed || !FOLDER_FEATURE_TOOLS.has(tool)) &&
 							(instanceContextAvailable || !ACTIVITY_LOG_TOOLS.has(tool)) &&
-							(instanceContextEnabled || !INSTANCE_CONTEXT_TOOLS.has(tool)) &&
+							(skillSourcesAvailable || !SKILL_SOURCE_TOOLS.has(tool)) &&
 							(credentialDescriptionsEnabled || tool !== 'update_credential_description'),
 					),
 				]),
